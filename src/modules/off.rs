@@ -64,7 +64,11 @@ impl Report {
     }
 
     pub fn summary(&self) -> String {
-        let done = self.steps.iter().filter(|s| s.state == StepState::Done).count();
+        let done = self
+            .steps
+            .iter()
+            .filter(|s| s.state == StepState::Done)
+            .count();
         let skipped = self
             .steps
             .iter()
@@ -92,7 +96,14 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     }
     ctx.log(format!("Итог: {}", rep.summary()));
     if rep.ok() {
-        ctx.log("✓ Готово: обход выключен, система возвращена как была.");
+        if rep.steps.iter().all(|s| s.state == StepState::Done) {
+            ctx.log("✓ Готово: обход выключен, система возвращена как была.");
+        } else {
+            ctx.log(format!(
+                "✓ Готово: наше выключено ({}). Чужие установки не тронуты.",
+                rep.summary()
+            ));
+        }
         ctx.log("  Файлы программы остались на месте — включить можно снова.");
         Ok(())
     } else {
@@ -258,7 +269,10 @@ fn step_process(ctx: &Ctx, journal: &Journal) -> StepResult {
         let _ = proc::forget(&ctx.data, image);
     }
     if problems.is_empty() {
-        r(StepState::Done, format!("остановлено: {}", killed.join(", ")))
+        r(
+            StepState::Done,
+            format!("остановлено: {}", killed.join(", ")),
+        )
     } else {
         r(StepState::Failed, problems.join("; "))
     }
@@ -272,7 +286,8 @@ fn our_binary_from_run_value(ctx: &Ctx) -> Option<String> {
         };
         let path = raw.trim().trim_matches('"');
         let first = path.split('"').next().unwrap_or(path).trim();
-        if first.to_ascii_lowercase().ends_with(".exe") && points_into_our_folder(first, &ctx.data) {
+        if first.to_ascii_lowercase().ends_with(".exe") && points_into_our_folder(first, &ctx.data)
+        {
             return Some(first.to_string());
         }
     }

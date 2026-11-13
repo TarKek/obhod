@@ -194,7 +194,11 @@ pub fn tagline(lang: &str) -> &'static str {
 
 /// Example node name for the UI ("Серверы будут вида «…»").
 pub fn sample(lang: &str) -> String {
-    let country = if lang == "ru" { "Германия" } else { "Germany" };
+    let country = if lang == "ru" {
+        "Германия"
+    } else {
+        "Germany"
+    };
     brand().server_name("🇩🇪", "DE", country)
 }
 
@@ -304,7 +308,10 @@ mod tests {
             server_name: "{name} · {country} ({code}) {flag}".into(),
             ..Brand::default()
         };
-        assert_eq!(b.server_name("🇫🇮", "FI", "Финляндия"), "MyVPN · Финляндия (FI) 🇫🇮");
+        assert_eq!(
+            b.server_name("🇫🇮", "FI", "Финляндия"),
+            "MyVPN · Финляндия (FI) 🇫🇮"
+        );
     }
 
     #[test]
@@ -321,7 +328,7 @@ mod tests {
         assert_eq!(d.name, "obhod");
         assert_eq!(d.colors.accent, "cyan");
 
-        let bom = format!("\u{feff}{{\"name\": \"X\"}}");
+        let bom = "\u{feff}{\"name\": \"X\"}";
         let b: Brand = serde_json::from_str(bom.trim_start_matches('\u{feff}')).expect("bom json");
         assert_eq!(b.name, "X");
         assert_eq!(b.colors.ok, "green");

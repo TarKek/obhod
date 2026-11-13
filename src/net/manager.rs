@@ -117,11 +117,7 @@ pub struct Node {
 impl Node {
     /// Trailing failed checks (most recent first).
     pub fn consecutive_failures(&self) -> u32 {
-        self.history
-            .iter()
-            .rev()
-            .take_while(|p| !p.ok)
-            .count() as u32
+        self.history.iter().rev().take_while(|p| !p.ok).count() as u32
     }
 
     pub fn recent_failures(&self, window: usize) -> u32 {
@@ -257,13 +253,15 @@ impl Filter {
                 return false;
             }
         }
-        if let Some(want) = self.country.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(want) = self
+            .country
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             let code_ok = node.country_code.eq_ignore_ascii_case(want);
             let name_ok = !node.country.is_empty()
-                && node
-                    .country
-                    .to_lowercase()
-                    .contains(&want.to_lowercase());
+                && node.country.to_lowercase().contains(&want.to_lowercase());
             if !code_ok && !name_ok {
                 return false;
             }
@@ -592,10 +590,7 @@ impl NodeStore {
             self.last_switch = Some(now);
             return;
         }
-        if let FailoverDecision::Keep {
-            node: Some(id), ..
-        } = decision
-        {
+        if let FailoverDecision::Keep { node: Some(id), .. } = decision {
             if self.active.is_none() {
                 self.active = Some(id.clone());
                 self.active_since = now;
@@ -785,7 +780,11 @@ mod tests {
             link("b.example", 443, "22222222-2222-4222-8222-222222222222"),
         ];
         if three {
-            links.push(link("c.example", 443, "33333333-3333-4333-8333-333333333333"));
+            links.push(link(
+                "c.example",
+                443,
+                "33333333-3333-4333-8333-333333333333",
+            ));
         }
         let st = s.import(&links, "test", 1000);
         assert_eq!(st.imported, links.len());
@@ -836,7 +835,12 @@ mod tests {
         let mut s = NodeStore::new();
         let a = link("a.example", 443, "11111111-1111-4111-8111-111111111111");
         let st = s.import(
-            &[a.clone(), a.clone(), "garbage".to_string(), link("b.example", 8443, "22222222-2222-4222-8222-222222222222")],
+            &[
+                a.clone(),
+                a.clone(),
+                "garbage".to_string(),
+                link("b.example", 8443, "22222222-2222-4222-8222-222222222222"),
+            ],
             "src1",
             1000,
         );
@@ -1066,7 +1070,10 @@ mod tests {
         }
         let n = s.get(&id).unwrap();
         assert_eq!(n.history.len(), HISTORY_LIMIT);
-        assert_eq!(n.history.last().unwrap().at, 1000 + HISTORY_LIMIT as u64 + 9);
+        assert_eq!(
+            n.history.last().unwrap().at,
+            1000 + HISTORY_LIMIT as u64 + 9
+        );
         assert_eq!(n.history(3).len(), 3);
         assert_eq!(n.consecutive_failures(), 0);
     }

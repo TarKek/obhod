@@ -1,9 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::util;
 
 pub mod check;
 pub mod clients;
@@ -26,8 +25,6 @@ pub struct RunOptions {
     pub autostart: bool,
     pub service_mode: bool,
     pub hosts_block_ads: bool,
-    pub autoupdate_days: u32,
-    pub reminders: bool,
     pub telemetry: bool,
     pub repo: String,
     pub keep_zapret: bool,
@@ -36,6 +33,8 @@ pub struct RunOptions {
     pub client: String,
     pub client_dir: PathBuf,
 }
+
+type StepFn = fn(&Ctx) -> Result<()>;
 
 pub struct Ctx {
     pub data: PathBuf,
@@ -58,7 +57,7 @@ impl Ctx {
 
 pub fn run_all(ctx: &Ctx) -> bool {
     let c = ctx.opts.components.clone();
-    let mut steps: Vec<(&str, fn(&Ctx) -> Result<()>)> = Vec::new();
+    let mut steps: Vec<(&str, StepFn)> = Vec::new();
     if c.zapret {
         steps.push(("zapret", crate::modules::zapret::run));
     }
@@ -105,8 +104,6 @@ pub fn prepare(cfg: &Config) -> Result<RunOptions> {
         autostart: cfg.autostart,
         service_mode: cfg.service_mode,
         hosts_block_ads: cfg.hosts_block_ads,
-        autoupdate_days: cfg.autoupdate_days,
-        reminders: cfg.reminders,
         telemetry: cfg.telemetry,
         repo: cfg.repo.clone(),
         keep_zapret: false,
@@ -115,28 +112,4 @@ pub fn prepare(cfg: &Config) -> Result<RunOptions> {
         client: cfg.client.clone(),
         client_dir: PathBuf::from(&cfg.client_dir),
     })
-}
-
-pub fn install_autostart(exe_name: &str) -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let val = format!("\"{}\" --minimized", exe.display());
-    util::reg_set_string(
-        "HKCU",
-        r"Software\Microsoft\Windows\CurrentVersion\Run",
-        exe_name,
-        &val,
-    )
-    .context("не удалось прописать автозагрузку")
-}
-
-pub fn remove_autostart(exe_name: &str) -> Result<()> {
-    util::reg_delete_value(
-        "HKCU",
-        r"Software\Microsoft\Windows\CurrentVersion\Run",
-        exe_name,
-    )
-}
-
-pub fn read_text_if_exists(p: &Path) -> Option<String> {
-    fs::read_to_string(p).ok()
 }

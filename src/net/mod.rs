@@ -138,10 +138,7 @@ pub fn b64_encode(bytes: &[u8]) -> String {
 pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = parent.join(format!(
         ".{name}.tmp-{}-{}",
         std::process::id(),
@@ -200,7 +197,7 @@ mod tests {
         assert_eq!(b64_decode_text("SGVsbG8=").as_deref(), Some("Hello"));
         assert_eq!(b64_decode_text("SGVsbG8").as_deref(), Some("Hello"));
         assert_eq!(b64_decode_text("SGk_").as_deref(), Some("Hi?"));
-        assert_eq!(b64_decode_text("!!!").is_none(), true);
+        assert!(b64_decode_text("!!!").is_none());
     }
 
     #[test]

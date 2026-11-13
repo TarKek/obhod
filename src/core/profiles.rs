@@ -69,13 +69,15 @@ impl Profile {
         if self.name_ru.trim().is_empty() && self.name_en.trim().is_empty() {
             bail!("profile needs a name");
         }
-        if !matches!(
-            self.client.as_str(),
-            "none" | "hiddify" | "v2rayn" | "happ"
-        ) {
+        if !matches!(self.client.as_str(), "none" | "hiddify" | "v2rayn" | "happ") {
             bail!("unknown client '{}'", self.client);
         }
-        if !self.bypass && !self.dns && !self.hosts && !self.mtproto && !self.tgws && !self.subscriptions
+        if !self.bypass
+            && !self.dns
+            && !self.hosts
+            && !self.mtproto
+            && !self.tgws
+            && !self.subscriptions
         {
             bail!("profile switches nothing on");
         }

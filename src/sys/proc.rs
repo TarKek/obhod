@@ -156,7 +156,11 @@ pub fn owned_alive(dir: &Path, be: &dyn ProcBackend, image: &str) -> Result<Vec<
     let o = load(dir);
     let live = be.list(image)?;
     let mut out = Vec::new();
-    for rec in o.processes.iter().filter(|p| p.image.eq_ignore_ascii_case(image)) {
+    for rec in o
+        .processes
+        .iter()
+        .filter(|p| p.image.eq_ignore_ascii_case(image))
+    {
         if let Some(p) = live.iter().find(|p| p.pid == rec.pid) {
             // Reused pid? Only trust it when the image path still matches.
             if same_exe(&p.exe, &rec.exe) {
@@ -210,10 +214,11 @@ pub fn service_owned(dir: &Path, name: &str) -> bool {
 
 pub fn own_run_value(dir: &Path, rv: &RunValue) -> Result<()> {
     let mut o = load(dir);
-    o.run_values
-        .retain(|r| !(r.root.eq_ignore_ascii_case(&rv.root)
+    o.run_values.retain(|r| {
+        !(r.root.eq_ignore_ascii_case(&rv.root)
             && r.path.eq_ignore_ascii_case(&rv.path)
-            && r.name.eq_ignore_ascii_case(&rv.name)));
+            && r.name.eq_ignore_ascii_case(&rv.name))
+    });
     o.run_values.push(rv.clone());
     save(dir, &o)
 }
@@ -397,7 +402,9 @@ mod tests {
         assert_eq!(owned_alive(dir.path(), &be, "winws.exe").unwrap().len(), 1);
         // Same pid, different image: not ours any more.
         be.alive.borrow_mut()[0].exe = r"C:\theirs\winws.exe".into();
-        assert!(owned_alive(dir.path(), &be, "winws.exe").unwrap().is_empty());
+        assert!(owned_alive(dir.path(), &be, "winws.exe")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -55,7 +55,11 @@ pub fn run_with_data(data: &Path) -> Vec<CheckItem> {
     let yt = {
         let c = client.clone();
         std::thread::spawn(move || {
-            probe_http(c.as_ref(), "https://www.youtube.com/generate_204", &[204, 200])
+            probe_http(
+                c.as_ref(),
+                "https://www.youtube.com/generate_204",
+                &[204, 200],
+            )
         })
     };
     let dc = {
@@ -288,10 +292,8 @@ pub fn proxy_signals(data: &Path) -> Option<ProxySignals> {
             std::thread::spawn(move || telegram::probe(&p.server, p.port, &p.secret, &cfg))
         })
         .collect();
-    let results: Vec<proxy::ProbeResult> = handles
-        .into_iter()
-        .filter_map(|h| h.join().ok())
-        .collect();
+    let results: Vec<proxy::ProbeResult> =
+        handles.into_iter().filter_map(|h| h.join().ok()).collect();
     Some(ProxySignals {
         checked,
         tcp_ok: results.iter().filter(|r| r.tcp_ok).count(),
@@ -329,11 +331,7 @@ fn subs_item(data: &Path) -> Option<CheckItem> {
     })
 }
 
-fn probe_http(
-    client: Option<&reqwest::blocking::Client>,
-    url: &str,
-    ok_codes: &[u16],
-) -> bool {
+fn probe_http(client: Option<&reqwest::blocking::Client>, url: &str, ok_codes: &[u16]) -> bool {
     let Some(c) = client else { return false };
     let started = Instant::now();
     match c.get(url).timeout(Duration::from_secs(6)).send() {

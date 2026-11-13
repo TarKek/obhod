@@ -16,7 +16,10 @@ const IMAGE: &str = "winws.exe";
 pub fn service_running() -> bool {
     match util::hidden_str("sc", &["query", SERVICE]) {
         Ok(o) => {
-            o.status.success() && String::from_utf8_lossy(&o.stdout).to_ascii_uppercase().contains("RUNNING")
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .to_ascii_uppercase()
+                    .contains("RUNNING")
         }
         Err(_) => false,
     }
@@ -74,7 +77,10 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         fs::create_dir_all(&dl)?;
         let zip = util::github_asset(&client, REPO, ".zip", &dl)
             .context("не удалось скачать релиз zapret")?;
-        ctx.log(format!("Распаковываю {}", zip.file_name().unwrap_or_default().to_string_lossy()));
+        ctx.log(format!(
+            "Распаковываю {}",
+            zip.file_name().unwrap_or_default().to_string_lossy()
+        ));
         util::unzip(&zip, &dir)?;
     } else {
         ctx.log("zapret уже скачан, использую локальную копию.");
@@ -175,35 +181,36 @@ fn start_portable(ctx: &Ctx, dir: &Path, preset: &str) -> Result<()> {
         .with_context(|| format!("не удалось запустить {}", bat.display()))?;
     ctx.log("zapret запущен (портативно). Проверяю...");
 
-    // Poll for the process instead of a blind sleep.
+    // Cheap poll first (tasklist), then one CIM query to record ownership.
     let started = Instant::now();
-    let mut seen = false;
+    let mut appeared = false;
     while started.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(500));
-        if let Ok(list) = be.list(IMAGE) {
-            if list.iter().any(|p| !before.iter().any(|b| b.pid == p.pid)) {
-                seen = true;
-                break;
-            }
+        if crate::modules::detect::proc_running(IMAGE) {
+            appeared = true;
+            break;
         }
     }
-
-    if seen {
-        match proc::record_new(&ctx.data, &be, IMAGE, &before) {
-            Ok(fresh) if !fresh.is_empty() => {
-                for p in &fresh {
-                    ctx.log(format!(
-                        "✓ winws.exe работает (pid {}, {})",
-                        p.pid,
-                        if p.exe.is_empty() { "путь неизвестен" } else { &p.exe }
-                    ));
-                }
-            }
-            Ok(_) => ctx.log("✓ winws.exe работает"),
-            Err(e) => ctx.log(format!("⚠ процесс работает, но владение не записано: {e:#}")),
-        }
-    } else {
+    if !appeared {
         ctx.log("⚠ winws.exe не найден. Нужны права администратора (WinDivert).");
+        return Ok(());
+    }
+
+    match proc::record_new(&ctx.data, &be, IMAGE, &before) {
+        Ok(fresh) if !fresh.is_empty() => {
+            for p in &fresh {
+                ctx.log(format!(
+                    "✓ winws.exe работает (pid {}, {})",
+                    p.pid,
+                    if p.exe.is_empty() { "путь неизвестен" } else { &p.exe }
+                ));
+            }
+        }
+        Ok(_) if !before.is_empty() => ctx.log(
+            "⚠ winws.exe работает, но запущен не нами — владение не записано, при выключении не тронем.",
+        ),
+        Ok(_) => ctx.log("✓ winws.exe работает"),
+        Err(e) => ctx.log(format!("⚠ процесс работает, но владение не записано: {e:#}")),
     }
     Ok(())
 }
@@ -300,7 +307,10 @@ fn wait_service_gone(timeout: Duration) -> bool {
 
 /// Turn a zapret .bat into a single winws.exe command line.
 pub fn bat_to_cmdline(text: &str, dir: &Path) -> Option<String> {
-    let joined = text.replace("^\r\n", " ").replace("^\n", " ").replace("\\\r\n", " ");
+    let joined = text
+        .replace("^\r\n", " ")
+        .replace("^\n", " ")
+        .replace("\\\r\n", " ");
     let flat: String = joined
         .lines()
         .filter(|l| !l.trim_start().starts_with("::"))
@@ -415,7 +425,10 @@ mod tests {
             r#""C:\my tools\bin\winws.exe" --wf-tcp=80,443 "--hostlist=C:\my tools\lists\list.txt" --new --filter-udp=443"#
         );
         // It must survive a trip through a command line unchanged.
-        assert_eq!(util::split_windows_cmdline(&util::quote_win_arg(&bin)), vec![bin.clone()]);
+        assert_eq!(
+            util::split_windows_cmdline(&util::quote_win_arg(&bin)),
+            vec![bin.clone()]
+        );
     }
 
     #[test]
@@ -442,7 +455,10 @@ start \"zapret\" /min \"%BIN%winws.exe\" --wf-tcp=80,443 --wf-udp=443 ^
         let dir = Path::new(r"C:\tools\data\zapret");
         let cmd = bat_to_cmdline(bat, dir).unwrap();
         assert!(cmd.contains(r"C:\tools\data\zapret\bin\winws.exe"), "{cmd}");
-        assert!(cmd.contains(r#"--hostlist="C:\tools\data\zapret\lists\list.txt""#), "{cmd}");
+        assert!(
+            cmd.contains(r#"--hostlist="C:\tools\data\zapret\lists\list.txt""#),
+            "{cmd}"
+        );
         assert!(cmd.contains("--filter-l7=discord,stun"), "{cmd}");
         // Still a single command line that can be split into argv.
         assert!(util::split_windows_cmdline(&cmd).len() >= 6);

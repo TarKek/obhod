@@ -122,8 +122,7 @@ pub fn start_with(cfg: ServerConfig) -> Option<Server> {
             match listener.accept() {
                 Ok((stream, _)) => {
                     let _ = stream.set_nonblocking(false);
-                    if accept_shared.active.load(Ordering::SeqCst)
-                        >= accept_shared.max_connections
+                    if accept_shared.active.load(Ordering::SeqCst) >= accept_shared.max_connections
                     {
                         // Too many clients: answer quickly, do not queue.
                         let mut s = stream;
@@ -329,7 +328,14 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
             return;
         }
         Err(ParseError::Malformed) => {
-            let _ = respond(&mut stream, 400, "Bad Request", &[], b"bad request\n", false);
+            let _ = respond(
+                &mut stream,
+                400,
+                "Bad Request",
+                &[],
+                b"bad request\n",
+                false,
+            );
             return;
         }
     };
@@ -347,7 +353,14 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
             return;
         }
         Err(_) => {
-            let _ = respond(&mut stream, 400, "Bad Request", &[], b"bad request\n", false);
+            let _ = respond(
+                &mut stream,
+                400,
+                "Bad Request",
+                &[],
+                b"bad request\n",
+                false,
+            );
             return;
         }
     };
@@ -484,7 +497,10 @@ mod tests {
     }
 
     fn get(port: u16, path: &str) -> String {
-        send(port, &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+        send(
+            port,
+            &format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"),
+        )
     }
 
     #[test]
@@ -585,7 +601,8 @@ mod tests {
         // Open a connection and leave it hanging (no request sent), then make a
         // second request: it must be refused with 503.
         let mut held = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
-        held.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        held.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
         std::thread::sleep(Duration::from_millis(120));
         let r = get(srv.port, &format!("/sub/{TOKEN}"));
         // The first connection may time out before the second is scheduled on

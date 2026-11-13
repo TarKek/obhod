@@ -23,11 +23,11 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use crate::net::sha256_file;
 use crate::net::trust::{
     self, digest_matches, normalize_sha256, ManifestCheck, TrustLevel, MANIFEST_ASSET,
     SIGNATURE_ASSET,
 };
-use crate::net::sha256_file;
 
 /// Public repository that hosts releases. Must stay public: updates are
 /// downloaded without a token.
@@ -181,11 +181,7 @@ pub fn check_and_apply(args: &[String]) -> Result<bool> {
         return Ok(false);
     }
 
-    crate::logger::info(format!(
-        "self-update: {} -> {}",
-        current_version(),
-        rel.tag
-    ));
+    crate::logger::info(format!("self-update: {} -> {}", current_version(), rel.tag));
 
     let new = dir.join("obhod.new.exe");
     let _ = fs::remove_file(&new);
@@ -347,11 +343,7 @@ fn manifest_matches_tag(manifest_version: &str, tag: &str) -> bool {
     }
 }
 
-fn download_text(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    limit: usize,
-) -> Result<String> {
+fn download_text(client: &reqwest::blocking::Client, url: &str, limit: usize) -> Result<String> {
     let mut resp = client.get(url).send()?;
     if !resp.status().is_success() {
         bail!("HTTP {} для {url}", resp.status());

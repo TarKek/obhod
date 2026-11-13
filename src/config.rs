@@ -295,7 +295,10 @@ mod tests {
         assert!(cfg.components.zapret);
         // Written back: the file on disk now carries the version.
         let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"version\""), "migrated file not saved: {text}");
+        assert!(
+            text.contains("\"version\""),
+            "migrated file not saved: {text}"
+        );
         // And a backup of the pre-migration file exists.
         assert!(backup_path(&path).exists());
     }
@@ -373,7 +376,10 @@ mod tests {
         let now = fs::read_to_string(&path).unwrap();
         let prev = fs::read_to_string(backup_path(&path)).unwrap();
         assert!(now.contains("\"en\""));
-        assert!(prev.contains("\"ru\""), "backup must hold the previous file");
+        assert!(
+            prev.contains("\"ru\""),
+            "backup must hold the previous file"
+        );
 
         // No temporary files left behind.
         let leftovers: Vec<String> = fs::read_dir(dir.path())

@@ -125,7 +125,9 @@ pub fn recover_pending(data_dir: &Path) -> Result<RecoveryReport> {
         SnapshotState::Incomplete
     ) {
         let _ = dns_state::remove_snapshot(data_dir);
-        crate::logger::info("DNS-снимок был недописан (сбой при снятии) — удалён, изменений не было");
+        crate::logger::info(
+            "DNS-снимок был недописан (сбой при снятии) — удалён, изменений не было",
+        );
     }
     Ok(rep)
 }

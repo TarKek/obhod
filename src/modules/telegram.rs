@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::modules::Ctx;
+use crate::net::atomic_write;
 use crate::net::links;
 use crate::net::proxy::{self, ProbeConfig};
-use crate::net::atomic_write;
 use crate::util;
 
 const SOURCES: &[&str] = &[
@@ -118,12 +118,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         handles.push(std::thread::spawn(move || loop {
             let next = { q.lock().unwrap().pop_front() };
             let Some(p) = next else { break };
-            let r = proxy::probe_mtproto(
-                &p.server,
-                p.port,
-                Some(&p.secret),
-                &cfg,
-            );
+            let r = proxy::probe_mtproto(&p.server, p.port, Some(&p.secret), &cfg);
             let msg = Probe {
                 ms: r.latency_ms.unwrap_or(u64::MAX),
                 ok: r.tcp_ok,
@@ -269,9 +264,8 @@ pub fn parse_link(l: &str) -> Option<MtProxy> {
             _ => {}
         }
     }
-    let server = server.filter(|s| {
-        !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c == '/')
-    })?;
+    let server =
+        server.filter(|s| !s.is_empty() && !s.chars().any(|c| c.is_whitespace() || c == '/'))?;
     let port = port.filter(|p| *p > 0)?;
     Some(MtProxy {
         server,
@@ -320,7 +314,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(b.server, "proxy.example");
-        assert!(b.link().starts_with("tg://proxy?server=proxy.example&port=8443"));
+        assert!(b
+            .link()
+            .starts_with("tg://proxy?server=proxy.example&port=8443"));
 
         // base64 secret (16 bytes) is normalized to hex
         let b64 = util::base64("\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\u{9}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}");
@@ -330,25 +326,34 @@ mod tests {
 
     #[test]
     fn rejects_invalid_links() {
-        assert!(parse_link("tg://proxy?server=1.2.3.4&port=0&secret=0123456789abcdef0123456789abcdef").is_none());
+        assert!(parse_link(
+            "tg://proxy?server=1.2.3.4&port=0&secret=0123456789abcdef0123456789abcdef"
+        )
+        .is_none());
         assert!(parse_link("tg://proxy?server=1.2.3.4&port=443&secret=zz").is_none());
-        assert!(parse_link("tg://proxy?port=443&secret=0123456789abcdef0123456789abcdef").is_none());
+        assert!(
+            parse_link("tg://proxy?port=443&secret=0123456789abcdef0123456789abcdef").is_none()
+        );
         assert!(parse_link("vless://x@h:443").is_none());
         assert!(parse_link("").is_none());
     }
 
     #[test]
     fn duplicates_are_removed_by_secret_and_endpoint() {
-        let a = parse_link("tg://proxy?server=H&port=443&secret=0123456789abcdef0123456789abcdef").unwrap();
-        let b = parse_link("tg://proxy?server=h&port=443&secret=0123456789abcdef0123456789abcdef").unwrap();
+        let a = parse_link("tg://proxy?server=H&port=443&secret=0123456789abcdef0123456789abcdef")
+            .unwrap();
+        let b = parse_link("tg://proxy?server=h&port=443&secret=0123456789abcdef0123456789abcdef")
+            .unwrap();
         assert_eq!(a.key(), b.key());
-        let c = parse_link("tg://proxy?server=h&port=443&secret=0123456789abcdef0123456789abcdee").unwrap();
+        let c = parse_link("tg://proxy?server=h&port=443&secret=0123456789abcdef0123456789abcdee")
+            .unwrap();
         assert_ne!(a.key(), c.key());
     }
 
     #[test]
     fn debug_hides_the_secret() {
-        let p = parse_link("tg://proxy?server=h&port=443&secret=0123456789abcdef0123456789abcdef").unwrap();
+        let p = parse_link("tg://proxy?server=h&port=443&secret=0123456789abcdef0123456789abcdef")
+            .unwrap();
         let text = format!("{p:?}");
         assert!(!text.contains("0123456789abcdef"));
         assert!(text.contains("<hidden>"));

@@ -89,9 +89,7 @@ pub fn telegram_path() -> Option<PathBuf> {
 
 /// Path from `…\CurrentVersion\App Paths\<exe>` (HKLM, then HKCU).
 fn app_path(exe: &str) -> Option<PathBuf> {
-    let key = format!(
-        r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
-    );
+    let key = format!(r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}");
     for root in ["HKLM:", "HKCU:"] {
         let ps = format!(
             "$ErrorActionPreference='SilentlyContinue'; (Get-ItemProperty '{root}\\{key}').'(default)'"
@@ -293,7 +291,10 @@ pub fn installed() -> Vec<Installed> {
         let mut path = reg
             .and_then(|r| r.location.as_deref())
             .and_then(|d| find_exe_in(d, exe, 5))
-            .or_else(|| reg.and_then(|r| r.icon.as_deref()).and_then(|p| exe_near(p, exe)));
+            .or_else(|| {
+                reg.and_then(|r| r.icon.as_deref())
+                    .and_then(|p| exe_near(p, exe))
+            });
         if path.is_none() {
             for d in &dirs {
                 if let Some(p) = find_exe_in(d, exe, 4) {
@@ -303,7 +304,13 @@ pub fn installed() -> Vec<Installed> {
             }
         }
         if path.is_some() || reg.is_some() {
-            raw.push((key, disp.into(), path, reg.and_then(|r| r.version.clone()), false));
+            raw.push((
+                key,
+                disp.into(),
+                path,
+                reg.and_then(|r| r.version.clone()),
+                false,
+            ));
         }
     }
 
@@ -559,7 +566,11 @@ pub fn parse_service_image(raw: &str) -> Option<PathBuf> {
 }
 
 pub fn keep_flag(items: &[Found], key: &str) -> bool {
-    items.iter().find(|f| f.key == key).map(|f| f.keep).unwrap_or(false)
+    items
+        .iter()
+        .find(|f| f.key == key)
+        .map(|f| f.keep)
+        .unwrap_or(false)
 }
 
 fn yes_no(v: bool) -> &'static str {
@@ -603,7 +614,11 @@ pub fn service_exists(name: &str) -> bool {
 
 pub fn proc_running(exe: &str) -> bool {
     util::hidden_str("tasklist", &["/FI", &format!("IMAGENAME eq {exe}")])
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains(&exe.to_lowercase()))
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .to_lowercase()
+                .contains(&exe.to_lowercase())
+        })
         .unwrap_or(false)
 }
 

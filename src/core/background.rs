@@ -4,27 +4,18 @@
 //! pieces needed by a future tray: a due-time scheduler and a heartbeat
 //! thread. It never changes the system by itself.
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 /// Persisted schedule for periodic work (subscriptions / checks).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Schedule {
     /// 0 disables the schedule.
     pub interval_secs: u64,
     pub last_run: u64,
-}
-
-impl Default for Schedule {
-    fn default() -> Self {
-        Self {
-            interval_secs: 0,
-            last_run: 0,
-        }
-    }
 }
 
 impl Schedule {
@@ -62,43 +53,31 @@ pub enum Tick {
 
 /// Sends ticks on a dedicated thread. Dropping the receiver stops the thread
 /// at the next interval, so app shutdown does not hang.
-pub fn spawn(
-    update_every: Duration,
-    health_every: Duration,
-    tx: Sender<Tick>,
-) -> JoinHandle<()> {
+pub fn spawn(update_every: Duration, health_every: Duration, tx: Sender<Tick>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let step = Duration::from_secs(1);
-        let mut update_left = update_every;
-        let mut health_left = health_every;
+        let start = Instant::now();
+        let update_secs = ((update_every.as_millis() as u64).div_ceil(1000)).max(1);
+        let health_secs = ((health_every.as_millis() as u64).div_ceil(1000)).max(1);
+        let mut update = Schedule::new(update_secs, 0);
+        let mut health = Schedule::new(health_secs, 0);
         loop {
             std::thread::sleep(step);
-            update_left = update_left.saturating_sub(step);
-            health_left = health_left.saturating_sub(step);
-            if update_left.is_zero() {
-                update_left = update_every;
+            let now = start.elapsed().as_secs();
+            if update.due(now) {
+                update.mark(now);
                 if tx.send(Tick::UpdateDue).is_err() {
                     return;
                 }
             }
-            if health_left.is_zero() {
-                health_left = health_every;
+            if health.due(now) {
+                health.mark(now);
                 if tx.send(Tick::HealthDue).is_err() {
                     return;
                 }
             }
         }
     })
-}
-
-/// Waits for a tick with a timeout; used instead of blocking recv so callers
-/// can react to UI events too.
-pub fn try_tick(rx: &Receiver<Tick>, timeout: Duration) -> Option<Tick> {
-    match rx.recv_timeout(timeout) {
-        Ok(t) => Some(t),
-        Err(RecvTimeoutError::Timeout) => None,
-        Err(RecvTimeoutError::Disconnected) => None,
-    }
 }
 
 #[cfg(test)]
@@ -125,11 +104,7 @@ mod tests {
     #[test]
     fn thread_stops_when_receiver_drops() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let h = spawn(
-            Duration::from_millis(10),
-            Duration::from_millis(10),
-            tx,
-        );
+        let h = spawn(Duration::from_millis(10), Duration::from_millis(10), tx);
         let first = rx.recv_timeout(Duration::from_secs(3));
         assert!(first.is_ok());
         drop(rx);

@@ -485,13 +485,15 @@ fn pick_two_per_country(
     let mut buckets: HashMap<String, Vec<(u128, String)>> = HashMap::new();
     let mut names: HashMap<String, String> = HashMap::new();
     for a in alive {
-        let (code, country) = a
-            .ip
-            .as_deref()
-            .and_then(|ip| geo.get(ip).cloned())
-            .unwrap_or_else(|| ("ZZ".to_string(), "Другая страна".to_string()));
+        let (code, country) =
+            a.ip.as_deref()
+                .and_then(|ip| geo.get(ip).cloned())
+                .unwrap_or_else(|| ("ZZ".to_string(), "Другая страна".to_string()));
         names.insert(code.clone(), country);
-        buckets.entry(code).or_default().push((a.ms, a.link.clone()));
+        buckets
+            .entry(code)
+            .or_default()
+            .push((a.ms, a.link.clone()));
     }
     let mut out: Vec<(u128, String)> = Vec::new();
     for (code, mut nodes) in buckets {
@@ -515,9 +517,7 @@ fn brand_name(code: &str, country: &str) -> String {
 fn flag_emoji(code: &str) -> String {
     if code.len() == 2 && code.bytes().all(|b| b.is_ascii_alphabetic()) {
         code.chars()
-            .filter_map(|c| {
-                char::from_u32(0x1F1E6 + (c.to_ascii_uppercase() as u32 - 'A' as u32))
-            })
+            .filter_map(|c| char::from_u32(0x1F1E6 + (c.to_ascii_uppercase() as u32 - 'A' as u32)))
             .collect()
     } else {
         "🌐".to_string()
@@ -556,10 +556,7 @@ fn percent_encode(s: &str) -> String {
 
 /// Human title of a renamed node, for logs.
 fn node_title(link: &str) -> String {
-    links::parse(link)
-        .ok()
-        .map(|l| l.name)
-        .unwrap_or_default()
+    links::parse(link).ok().map(|l| l.name).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -637,8 +634,7 @@ mod tests {
             save_alive(dir.path(), &[]).unwrap(),
             SaveOutcome::KeptPrevious(2)
         );
-        let plain_after =
-            std::fs::read_to_string(dir.path().join("subs_alive_plain.txt")).unwrap();
+        let plain_after = std::fs::read_to_string(dir.path().join("subs_alive_plain.txt")).unwrap();
         assert_eq!(plain_before, plain_after);
 
         // No previous list and no nodes: nothing is created.
@@ -704,7 +700,10 @@ mod tests {
         assert_eq!(picked.len(), 3);
         let titles: Vec<String> = picked.iter().map(|(_, l)| node_title(l)).collect();
         assert_eq!(titles.iter().filter(|t| t.contains("Германия")).count(), 2);
-        assert_eq!(titles.iter().filter(|t| t.contains("Нидерланды")).count(), 1);
+        assert_eq!(
+            titles.iter().filter(|t| t.contains("Нидерланды")).count(),
+            1
+        );
     }
 
     #[test]

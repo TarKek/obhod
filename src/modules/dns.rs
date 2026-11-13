@@ -66,7 +66,9 @@ pub fn reset(ctx: &Ctx) -> Result<()> {
             RestoreStep::active_only()
         }
         SnapshotState::Missing => {
-            ctx.log("Снимка DNS нет (меняли не мы) — сбрасываю активный интерфейс на автоматический.");
+            ctx.log(
+                "Снимка DNS нет (меняли не мы) — сбрасываю активный интерфейс на автоматический.",
+            );
             RestoreStep::active_only()
         }
     };
@@ -171,13 +173,15 @@ impl Step for SetDnsStep {
                     Some(serde_json::json!({ "servers": servers })),
                 )?;
             } else {
-                self.logs
-                    .push(format!("⚠ DNS {}: {}", o.alias, o.detail));
+                self.logs.push(format!("⚠ DNS {}: {}", o.alias, o.detail));
                 failed.push(format!("{}: {}", o.alias, o.detail));
             }
         }
         if !failed.is_empty() {
-            anyhow::bail!("DNS выставлен не на всех интерфейсах: {}", failed.join("; "));
+            anyhow::bail!(
+                "DNS выставлен не на всех интерфейсах: {}",
+                failed.join("; ")
+            );
         }
         self.logs
             .push(format!("✓ DNS выставлен на {}", servers.join(" / ")));
@@ -241,8 +245,7 @@ impl Step for SetDnsStep {
             .map(|o| format!("{} {}", o.alias, o.detail))
             .collect();
         for o in outcomes.iter().filter(|o| o.ok) {
-            self.logs
-                .push(format!("↩ DNS {}: {}", o.alias, o.detail));
+            self.logs.push(format!("↩ DNS {}: {}", o.alias, o.detail));
         }
         if !failed.is_empty() {
             anyhow::bail!("откат DNS неполный: {}", failed.join("; "));
@@ -303,7 +306,8 @@ impl Step for RestoreStep {
             .or_else(|| all.first())
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("не нашли ни одного сетевого интерфейса"))?;
-        self.logs.push(format!("Активный интерфейс: {}", pick.label()));
+        self.logs
+            .push(format!("Активный интерфейс: {}", pick.label()));
         self.active_only = Some(pick);
         Ok(Undo::None)
     }
@@ -326,8 +330,7 @@ impl Step for RestoreStep {
                     if o.ok {
                         self.logs.push(format!("✓ DoH {}: {}", o.alias, o.detail));
                     } else {
-                        self.logs
-                            .push(format!("⚠ DoH {}: {}", o.alias, o.detail));
+                        self.logs.push(format!("⚠ DoH {}: {}", o.alias, o.detail));
                         failed.push(format!("DoH {}: {}", o.alias, o.detail));
                     }
                 }
@@ -343,8 +346,10 @@ impl Step for RestoreStep {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("нет интерфейса для сброса"))?;
         SystemDns.reset_all(&iface)?;
-        self.logs
-            .push(format!("✓ DNS {}: снова получается автоматически", iface.alias));
+        self.logs.push(format!(
+            "✓ DNS {}: снова получается автоматически",
+            iface.alias
+        ));
         Ok(())
     }
 
@@ -352,7 +357,8 @@ impl Step for RestoreStep {
         if let Some(snap) = &self.snap {
             let problems = dns_state::verify_restored(&SystemDns, snap)?;
             if problems.is_empty() {
-                self.logs.push("✓ DNS проверен: как было до включения".into());
+                self.logs
+                    .push("✓ DNS проверен: как было до включения".into());
                 return Ok(());
             }
             anyhow::bail!("проверка восстановления DNS: {}", problems.join("; "));
@@ -362,7 +368,10 @@ impl Step for RestoreStep {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("нет интерфейса для проверки"))?;
         let live = SystemDns.read_all()?;
-        match live.iter().find(|i| i.guid.eq_ignore_ascii_case(&iface.guid)) {
+        match live
+            .iter()
+            .find(|i| i.guid.eq_ignore_ascii_case(&iface.guid))
+        {
             Some(i) if i.dhcp_v4 => {
                 self.logs.push("✓ DNS снова автоматический".into());
                 Ok(())
@@ -408,7 +417,10 @@ mod tests {
 
     #[test]
     fn short_guid_trims_braces() {
-        assert_eq!(short_guid("{B356F5DC-B57B-4B86-B73D-0151063F7176}"), "B356F5DC");
+        assert_eq!(
+            short_guid("{B356F5DC-B57B-4B86-B73D-0151063F7176}"),
+            "B356F5DC"
+        );
         assert_eq!(short_guid(""), "");
     }
 
@@ -418,7 +430,10 @@ mod tests {
         assert!(!has_snapshot(dir.path()));
         let snap = DnsSnapshot::empty("t");
         dns_state::write_snapshot(&dns_state::snapshot_path(dir.path()), &snap).unwrap();
-        assert!(!has_snapshot(dir.path()), "incomplete snapshot is not usable");
+        assert!(
+            !has_snapshot(dir.path()),
+            "incomplete snapshot is not usable"
+        );
         let mut done = DnsSnapshot::empty("t");
         done.complete = true;
         dns_state::write_snapshot(&dns_state::snapshot_path(dir.path()), &done).unwrap();

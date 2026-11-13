@@ -41,7 +41,11 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     ctx.log(format!(
         "hosts: {} строк, наш блок: {}",
         text.lines.len(),
-        if text.has_block() { "есть" } else { "нет" }
+        if text.has_block() {
+            "есть"
+        } else {
+            "нет"
+        }
     ));
 
     // 2. Backup-only mode still makes a backup (documented behaviour).
@@ -65,7 +69,9 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     let entries = match fetch_entries() {
         Ok(e) => e,
         Err(e) => {
-            ctx.log(format!("⚠ список рекламы не получен, hosts не изменён: {e:#}"));
+            ctx.log(format!(
+                "⚠ список рекламы не получен, hosts не изменён: {e:#}"
+            ));
             return Err(e);
         }
     };
@@ -179,7 +185,11 @@ impl<I: FsIo> Step for HostsStep<I> {
         self.logs.push(format!(
             "hosts: снимок {} строк, наш блок: {}",
             text.lines.len(),
-            if text.has_block() { "есть" } else { "нет" }
+            if text.has_block() {
+                "есть"
+            } else {
+                "нет"
+            }
         ));
         Ok(Undo::None)
     }
@@ -230,7 +240,8 @@ impl<I: FsIo> Step for HostsStep<I> {
         };
         self.logs.push(msg);
         if let Some(b) = &outcome.backup {
-            self.logs.push(format!("✓ Резервная копия hosts: {}", b.display()));
+            self.logs
+                .push(format!("✓ Резервная копия hosts: {}", b.display()));
         }
         h.record(
             "hosts",
@@ -355,10 +366,15 @@ mod tests {
         let res = transaction::run("hosts", &journal, vec![Box::new(step)]);
         assert!(!res.committed);
         assert_eq!(fs.write_count(), 0);
-        assert!(journal.pending().unwrap().is_empty(), "rollback left a terminal record");
+        assert!(
+            journal.pending().unwrap().is_empty(),
+            "rollback left a terminal record"
+        );
         // A failed snapshot is journaled as failed, which is what recovery reads.
         let recs = journal.tx_records(&res.tx).unwrap();
-        assert!(recs.iter().any(|r| r.phase == Phase::Snapshot && r.status == Status::Failed));
+        assert!(recs
+            .iter()
+            .any(|r| r.phase == Phase::Snapshot && r.status == Status::Failed));
     }
 
     #[test]
@@ -375,10 +391,18 @@ mod tests {
             ),
         );
         let journal = Journal::new(dir.path().join("data"));
-        let step = HostsStep::new(fs.clone(), dir.path().join("data"), hosts.clone(), Mode::Remove);
+        let step = HostsStep::new(
+            fs.clone(),
+            dir.path().join("data"),
+            hosts.clone(),
+            Mode::Remove,
+        );
         let res = transaction::run("hosts", &journal, vec![Box::new(step)]);
         assert!(res.committed, "{:?}", res.error);
-        assert_eq!(fs.text(&hosts).unwrap(), "127.0.0.1 localhost\n# после блока\n");
+        assert_eq!(
+            fs.text(&hosts).unwrap(),
+            "127.0.0.1 localhost\n# после блока\n"
+        );
     }
 
     #[test]
@@ -405,7 +429,10 @@ mod tests {
         let res = transaction::run("hosts", &journal, vec![Box::new(step)]);
         assert!(res.committed);
         assert_eq!(fs.write_count(), before);
-        assert!(res.messages.iter().any(|m| m.contains("уже в нужном состоянии")));
+        assert!(res
+            .messages
+            .iter()
+            .any(|m| m.contains("уже в нужном состоянии")));
     }
 
     #[test]
@@ -437,7 +464,9 @@ mod tests {
                 self.0.apply(h)?;
                 // Simulate something else breaking the file right after apply.
                 let p = self.0.path.clone();
-                self.0.io.write_atomic(&p, b"corrupted by something else\n")?;
+                self.0
+                    .io
+                    .write_atomic(&p, b"corrupted by something else\n")?;
                 Ok(())
             }
             fn verify(&mut self, h: &TxHandle) -> Result<()> {
@@ -471,8 +500,12 @@ mod tests {
     fn parse_helper_is_reused_for_the_module() {
         // Sanity: the module and the file layer agree on the block format.
         let t = HostsText::parse(
-            format!("{}\n0.0.0.0 ads.example\n{}\n", hosts_file::MARK_START, hosts_file::MARK_END)
-                .as_bytes(),
+            format!(
+                "{}\n0.0.0.0 ads.example\n{}\n",
+                hosts_file::MARK_START,
+                hosts_file::MARK_END
+            )
+            .as_bytes(),
         )
         .unwrap();
         assert!(t.has_block());

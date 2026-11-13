@@ -46,8 +46,12 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let name = brand::name();
     let title = match app.mode {
-        crate::app::Mode::Demo => format!(" {name} v{} · ДЕМО ", crate::selfupdate::current_version()),
-        crate::app::Mode::Dev => format!(" {name} v{} · DEV ", crate::selfupdate::current_version()),
+        crate::app::Mode::Demo => {
+            format!(" {name} v{} · ДЕМО ", crate::selfupdate::current_version())
+        }
+        crate::app::Mode::Dev => {
+            format!(" {name} v{} · DEV ", crate::selfupdate::current_version())
+        }
         crate::app::Mode::Normal => format!(" {name} v{} ", crate::selfupdate::current_version()),
     };
     let border = if app.mode.is_demo() {
@@ -59,10 +63,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border))
-        .title(Span::styled(
-            title,
-            Style::default().fg(border).bold(),
-        ));
+        .title(Span::styled(title, Style::default().fg(border).bold()));
     let hint = if app.mode.is_demo() {
         tr(
             &app.cfg.lang,
@@ -208,11 +209,15 @@ fn menu_col<'a>(titles: impl IntoIterator<Item = &'a str>) -> usize {
 
 /// One menu row shared by every list: `▶ Title   description`, the selected
 /// row is filled to the full width so it reads as a real menu.
-fn menu_row(title: &str, desc: &str, selected: bool, width: usize, col: usize) -> ListItem<'static> {
+fn menu_row(
+    title: &str,
+    desc: &str,
+    selected: bool,
+    width: usize,
+    col: usize,
+) -> ListItem<'static> {
     let base = if selected {
-        Style::default()
-            .fg(brand::on_accent())
-            .bg(brand::accent())
+        Style::default().fg(brand::on_accent()).bg(brand::accent())
     } else {
         Style::default()
     };
@@ -319,15 +324,40 @@ fn draw_home(f: &mut Frame, area: Rect, app: &App) {
             crate::core::Phase::Degraded => "•",
             crate::core::Phase::Failed => "✗",
             crate::core::Phase::Disabled => "–",
-            _ => "?",
+            crate::core::Phase::Installed
+            | crate::core::Phase::Configured
+            | crate::core::Phase::Running
+            | crate::core::Phase::Connected => "•",
+            crate::core::Phase::Unknown => "?",
         };
-        format!("{m} {}", if lang == "en" { c.name_en() } else { c.name_ru() })
+        format!(
+            "{m} {}",
+            if lang == "en" {
+                c.name_en()
+            } else {
+                c.name_ru()
+            }
+        )
     })
     .collect();
     items.push(ListItem::new(Line::from(Span::styled(
         format!("   {}", chips.join(" · ")),
         Style::default().fg(brand::muted()),
     ))));
+    for c in [
+        crate::core::Component::Bypass,
+        crate::core::Component::Dns,
+        crate::core::Component::Mtproto,
+        crate::core::Component::Subscriptions,
+    ] {
+        let st = app.core.status(c);
+        if st.phase.is_problem() && !st.detail(lang).is_empty() {
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!("   • {}", st.detail(lang)),
+                Style::default().fg(brand::warn()),
+            ))));
+        }
+    }
     if let Some(msg) = &app.status_msg {
         items.push(ListItem::new(Line::from(Span::styled(
             format!("   {msg}"),
@@ -421,11 +451,7 @@ fn draw_prelude(f: &mut Frame, area: Rect, app: &App) {
     let again = tr(lang, "настроить заново", "set up again");
 
     let width = inner_width(area);
-    let names: Vec<&str> = app
-        .found
-        .iter()
-        .map(|f| tr(lang, &f.ru, &f.en))
-        .collect();
+    let names: Vec<&str> = app.found.iter().map(|f| tr(lang, &f.ru, &f.en)).collect();
     let col = menu_col(names.iter().copied());
 
     for (i, fnd) in app.found.iter().enumerate() {
@@ -554,7 +580,10 @@ fn choice_line(opts: &[(&str, bool)], selected: bool, width: usize) -> Line<'sta
     for (n, (label, active)) in opts.iter().enumerate() {
         let style = if *active {
             if selected {
-                Style::default().fg(brand::on_accent()).bg(brand::ok()).bold()
+                Style::default()
+                    .fg(brand::on_accent())
+                    .bg(brand::ok())
+                    .bold()
             } else {
                 Style::default().fg(brand::ok()).bold()
             }
@@ -578,8 +607,12 @@ fn choice_line(opts: &[(&str, bool)], selected: bool, width: usize) -> Line<'sta
 
 fn draw_progress(f: &mut Frame, area: Rect, app: &App) {
     let lang = app.cfg.lang.as_str();
-    let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ])
+    .split(area);
     let pct = app.progress as f64 / 100.0;
     let gauge = Gauge::default()
         .block(block(tr(lang, "Прогресс", "Progress")))
@@ -606,7 +639,9 @@ fn draw_progress(f: &mut Frame, area: Rect, app: &App) {
             .map(|s| Line::from(s.clone()))
             .collect();
         f.render_widget(
-            Paragraph::new(tail).block(block("log")).wrap(Wrap { trim: true }),
+            Paragraph::new(tail)
+                .block(block("log"))
+                .wrap(Wrap { trim: true }),
             chunks[2],
         );
     } else {
@@ -640,7 +675,11 @@ fn draw_result(f: &mut Frame, area: Rect, app: &App) {
                     )
                 },
                 Style::default()
-                    .fg(if app.last_ok { brand::ok() } else { brand::warn() })
+                    .fg(if app.last_ok {
+                        brand::ok()
+                    } else {
+                        brand::warn()
+                    })
                     .bold(),
             )),
             Line::from(""),
@@ -734,9 +773,7 @@ fn draw_result(f: &mut Frame, area: Rect, app: &App) {
                 "happ" => "Happ",
                 _ => "приложение",
             };
-            lines.push(Line::from(format!(
-                "  ✓ {name} установлен и запущен."
-            )));
+            lines.push(Line::from(format!("  ✓ {name} установлен и запущен.")));
             lines.push(Line::from(tr(
                 lang,
                 "  Ссылка на подписку скопирована в буфер обмена.",
@@ -751,7 +788,11 @@ fn draw_result(f: &mut Frame, area: Rect, app: &App) {
                 "  {} «{}» {}",
                 tr(lang, "Серверы будут вида", "Servers look like"),
                 brand::sample(lang),
-                tr(lang, "— по 2 быстрых на страну.", "- 2 fastest per country.")
+                tr(
+                    lang,
+                    "— по 2 быстрых на страну.",
+                    "- 2 fastest per country."
+                )
             )));
         }
     } else {
@@ -759,12 +800,7 @@ fn draw_result(f: &mut Frame, area: Rect, app: &App) {
             tr(lang, "  Что не удалось:", "  What failed:"),
             Style::default().fg(brand::err()).bold(),
         )));
-        for line in app
-            .logs
-            .iter()
-            .filter(|l| l.contains('⚠'))
-            .take(3)
-        {
+        for line in app.logs.iter().filter(|l| l.contains('⚠')).take(3) {
             lines.push(Line::from(Span::styled(
                 format!("  • {}", line.trim_start_matches(['⚠', ' '])),
                 Style::default().fg(brand::secondary()),
@@ -821,10 +857,7 @@ fn draw_check(f: &mut Frame, area: Rect, app: &App) {
             );
         }
         Some(items) => {
-            let names: Vec<&str> = items
-                .iter()
-                .map(|it| tr(lang, &it.ru, &it.en))
-                .collect();
+            let names: Vec<&str> = items.iter().map(|it| tr(lang, &it.ru, &it.en)).collect();
             let col = menu_col(names.iter().copied());
             let ok_n = items.iter().filter(|i| i.ok).count();
             let total = items.len();
@@ -840,12 +873,7 @@ fn draw_check(f: &mut Frame, area: Rect, app: &App) {
                 )
             } else {
                 (
-                    format!(
-                        "{} {} / {}",
-                        tr(lang, "Работает:", "Working:"),
-                        ok_n,
-                        total
-                    ),
+                    format!("{} {} / {}", tr(lang, "Работает:", "Working:"), ok_n, total),
                     brand::warn(),
                 )
             };
@@ -875,6 +903,37 @@ fn draw_check(f: &mut Frame, area: Rect, app: &App) {
             }
             lines.push(Line::from(""));
             if let Some(report) = &app.health_report {
+                let overall = if lang == "en" {
+                    report.overall.name_en()
+                } else {
+                    report.overall.name_ru()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {}: {} · {} {}/{}",
+                        tr(lang, "Итог", "Overall"),
+                        overall,
+                        tr(lang, "этапов", "stages"),
+                        report.working_stages(),
+                        report.checked_stages()
+                    ),
+                    Style::default().fg(brand::text()),
+                )));
+                if let Some(p) = report.first_problem() {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "  {}: {} — {}",
+                            tr(lang, "Первый сбой", "First problem"),
+                            if lang == "en" {
+                                p.stage.name_en()
+                            } else {
+                                p.stage.name_ru()
+                            },
+                            p.detail(lang)
+                        ),
+                        Style::default().fg(brand::warn()),
+                    )));
+                }
                 lines.push(Line::from(Span::styled(
                     tr(lang, "  Этапы подключения:", "  Connection stages:"),
                     Style::default().fg(brand::text()).bold(),
@@ -888,7 +947,14 @@ fn draw_check(f: &mut Frame, area: Rect, app: &App) {
                     lines.push(Line::from(vec![
                         Span::styled(format!("   {mark} "), Style::default().fg(color).bold()),
                         Span::styled(
-                            format!("{:<22}", if lang == "en" { st.stage.name_en() } else { st.stage.name_ru() }),
+                            format!(
+                                "{:<22}",
+                                if lang == "en" {
+                                    st.stage.name_en()
+                                } else {
+                                    st.stage.name_ru()
+                                }
+                            ),
                             Style::default().fg(brand::text()),
                         ),
                         Span::styled(
@@ -984,14 +1050,17 @@ fn draw_profile_plan(f: &mut Frame, area: Rect, app: &App) {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-                tr(
-                    lang,
-                    "  Ничего не изменится, пока вы не нажмёте Enter.",
-                    "  Nothing changes until you press Enter.",
-                ),
-                Style::default().fg(brand::warn()),
-            )));
-        if changes.iter().any(|c| c.text(lang).contains("выкл") || c.text(lang).contains("off")) {
+            tr(
+                lang,
+                "  Ничего не изменится, пока вы не нажмёте Enter.",
+                "  Nothing changes until you press Enter.",
+            ),
+            Style::default().fg(brand::warn()),
+        )));
+        if changes
+            .iter()
+            .any(|c| c.text(lang).contains("выкл") || c.text(lang).contains("off"))
+        {
             lines.push(Line::from(Span::styled(
                 tr(
                     lang,
@@ -1016,19 +1085,40 @@ fn draw_profile_edit(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
     let width = inner_width(area);
-    let onoff = |v: bool| tr(lang, if v { "вкл" } else { "выкл" }, if v { "on" } else { "off" });
+    let onoff = |v: bool| {
+        tr(
+            lang,
+            if v { "вкл" } else { "выкл" },
+            if v { "on" } else { "off" },
+        )
+    };
     let rows: [(&str, &str); crate::app::PROFILE_ROWS] = [
-        (tr(lang, "Обход YouTube/Discord", "YouTube/Discord bypass"), onoff(p.bypass)),
+        (
+            tr(lang, "Обход YouTube/Discord", "YouTube/Discord bypass"),
+            onoff(p.bypass),
+        ),
         (tr(lang, "DNS", "DNS"), onoff(p.dns)),
         (tr(lang, "Hosts", "Hosts"), onoff(p.hosts)),
-        (tr(lang, "Прокси Telegram", "Telegram proxy"), onoff(p.mtproto)),
-        (tr(lang, "Мост TgWsProxy", "TgWsProxy bridge"), onoff(p.tgws)),
-        (tr(lang, "Подписки", "Subscriptions"), onoff(p.subscriptions)),
+        (
+            tr(lang, "Прокси Telegram", "Telegram proxy"),
+            onoff(p.mtproto),
+        ),
+        (
+            tr(lang, "Мост TgWsProxy", "TgWsProxy bridge"),
+            onoff(p.tgws),
+        ),
+        (
+            tr(lang, "Подписки", "Subscriptions"),
+            onoff(p.subscriptions),
+        ),
         (
             tr(lang, "Приложение для серверов", "Servers app"),
             crate::core::profiles::client_name(&p.client, lang),
         ),
-        (tr(lang, "Запускать при старте Windows", "Start with Windows"), onoff(p.autostart)),
+        (
+            tr(lang, "Запускать при старте Windows", "Start with Windows"),
+            onoff(p.autostart),
+        ),
         (tr(lang, "Сохранить профиль", "Save profile"), "Enter"),
     ];
     let titles: Vec<String> = rows.iter().map(|(t, _)| t.to_string()).collect();
@@ -1036,9 +1126,7 @@ fn draw_profile_edit(f: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
-        .map(|(i, (title, value))| {
-            menu_row(title, value, i == app.profile_edit_row, width, col)
-        })
+        .map(|(i, (title, value))| menu_row(title, value, i == app.profile_edit_row, width, col))
         .collect();
     let title = format!(
         "{} — {}",
@@ -1109,7 +1197,13 @@ fn draw_proxies(f: &mut Frame, area: Rect, app: &App) {
         }
         let rate = (n.success_rate(10) * 100.0).round() as i64;
         let desc = format!("{} · {}%", tags.join(" · "), rate);
-        items.push(menu_row(&names[i], &desc, i == app.proxy_idx, inner_width(area), col));
+        items.push(menu_row(
+            &names[i],
+            &desc,
+            i == app.proxy_idx,
+            inner_width(area),
+            col,
+        ));
     }
     if let Some(msg) = &app.proxy_msg {
         items.push(ListItem::new(Line::from("")));
@@ -1167,7 +1261,11 @@ fn draw_advanced(f: &mut Frame, area: Rect, app: &App) {
         .map(|item| match item {
             AdvItem::Health => (
                 tr(lang, "Состояние сети", "Network health"),
-                tr(lang, "DNS, соединение, прокси, сайты", "DNS, connection, proxy, sites"),
+                tr(
+                    lang,
+                    "DNS, соединение, прокси, сайты",
+                    "DNS, connection, proxy, sites",
+                ),
             ),
             AdvItem::Components => (
                 tr(lang, "Компоненты", "Components"),
@@ -1175,11 +1273,19 @@ fn draw_advanced(f: &mut Frame, area: Rect, app: &App) {
             ),
             AdvItem::Proxies => (
                 tr(lang, "Серверы", "Servers"),
-                tr(lang, "узлы, задержка, избранное, переключение", "nodes, latency, favorites, failover"),
+                tr(
+                    lang,
+                    "узлы, задержка, избранное, переключение",
+                    "nodes, latency, favorites, failover",
+                ),
             ),
             AdvItem::History => (
                 tr(lang, "История", "History"),
-                tr(lang, "что и когда делала программа", "what the app did and when"),
+                tr(
+                    lang,
+                    "что и когда делала программа",
+                    "what the app did and when",
+                ),
             ),
             AdvItem::Diagnostics => (
                 tr(lang, "Диагностика", "Diagnostics"),
@@ -1187,11 +1293,19 @@ fn draw_advanced(f: &mut Frame, area: Rect, app: &App) {
             ),
             AdvItem::Settings => (
                 tr(lang, "Настройки", "Settings"),
-                tr(lang, "язык, папка данных, напоминания", "language, data folder, reminders"),
+                tr(
+                    lang,
+                    "язык, папка данных, напоминания",
+                    "language, data folder, reminders",
+                ),
             ),
             AdvItem::Wizard => (
                 tr(lang, "Мастер настройки", "Setup wizard"),
-                tr(lang, "пошагово, для технарей", "step by step, for technical users"),
+                tr(
+                    lang,
+                    "пошагово, для технарей",
+                    "step by step, for technical users",
+                ),
             ),
             AdvItem::Back => (tr(lang, "Назад", "Back"), ""),
         })
@@ -1228,9 +1342,7 @@ fn draw_components(f: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
-        .map(|(i, (_, _, desc))| {
-            menu_row(&titles[i], desc, i == app.comp_cursor, width, col)
-        })
+        .map(|(i, (_, _, desc))| menu_row(&titles[i], desc, i == app.comp_cursor, width, col))
         .collect();
     f.render_widget(
         List::new(items).block(block(tr(lang, "Компоненты", "Components"))),
@@ -1442,7 +1554,12 @@ fn draw_settings(f: &mut Frame, area: Rect, app: &App) {
         .map(|item| match item {
             SetItem::Lang => (
                 tr(lang, "Язык", "Language"),
-                if app.cfg.lang == "ru" { "Русский" } else { "English" }.to_string(),
+                if app.cfg.lang == "ru" {
+                    "Русский"
+                } else {
+                    "English"
+                }
+                .to_string(),
             ),
             SetItem::Autoupdate => (
                 tr(lang, "Напоминать об обновлениях", "Update reminder"),

@@ -63,9 +63,16 @@ impl HostsText {
         };
         let text = std::str::from_utf8(body)
             .map_err(|_| anyhow::anyhow!("hosts не в кодировке UTF-8 — не трогаю"))?;
-        let eol = if text.contains("\r\n") { Eol::Crlf } else { Eol::Lf };
+        let eol = if text.contains("\r\n") {
+            Eol::Crlf
+        } else {
+            Eol::Lf
+        };
         let trailing_newline = text.ends_with('\n');
-        let mut lines: Vec<String> = text.split('\n').map(|l| l.trim_end_matches('\r').to_string()).collect();
+        let mut lines: Vec<String> = text
+            .split('\n')
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect();
         if trailing_newline {
             lines.pop();
         }
@@ -166,12 +173,9 @@ pub struct Outcome {
 
 /// Read the hosts file. Missing/unreadable is an error: callers must abort.
 pub fn read(io: &dyn FsIo, path: &Path) -> Result<HostsText> {
-    let bytes = io.read(path).with_context(|| {
-        format!(
-            "не удалось прочитать {} — hosts не изменён",
-            path.display()
-        )
-    })?;
+    let bytes = io
+        .read(path)
+        .with_context(|| format!("не удалось прочитать {} — hosts не изменён", path.display()))?;
     HostsText::parse(&bytes).with_context(|| format!("{} не разобран", path.display()))
 }
 
@@ -274,7 +278,14 @@ pub fn apply_block_to(
         anyhow::bail!("внутренняя проверка: содержимое блока не совпало");
     }
 
-    write_verified(io, path, backup, &original_bytes, &updated.render(), entries.len())
+    write_verified(
+        io,
+        path,
+        backup,
+        &original_bytes,
+        &updated.render(),
+        entries.len(),
+    )
 }
 
 /// Remove only our block; every other line stays exactly as it was.
@@ -307,7 +318,10 @@ pub fn remove_block_to(io: &dyn FsIo, path: &Path, backup: &Path) -> Result<Outc
     let user = text.user_lines()?;
     let mut lines = text.lines[..a].to_vec();
     lines.extend_from_slice(&text.lines[b + 1..]);
-    let updated = HostsText { lines, ..text.clone() };
+    let updated = HostsText {
+        lines,
+        ..text.clone()
+    };
     let rendered = updated.render();
 
     let reparsed = HostsText::parse(&rendered)?;
@@ -366,7 +380,10 @@ fn write_verified(
         .read(path)
         .with_context(|| format!("не удалось перечитать {} после записи", path.display()))?;
     if written != new_bytes {
-        anyhow::bail!("проверка после записи не прошла: содержимое {} не совпало", path.display());
+        anyhow::bail!(
+            "проверка после записи не прошла: содержимое {} не совпало",
+            path.display()
+        );
     }
 
     Ok(Outcome {
@@ -471,7 +488,10 @@ mod tests {
         assert!(text.starts_with("127.0.0.1 localhost\r\n::1 localhost\r\n10.0.0.5 nas\r\n"));
         assert!(text.contains(&format!("{MARK_START}\r\n0.0.0.0 ads.example\r\n")));
         assert!(text.ends_with(&format!("{MARK_END}\r\n")));
-        assert!(!text.contains("\n0.0.0.0 ads.example\n"), "LF leaked into CRLF file");
+        assert!(
+            !text.contains("\n0.0.0.0 ads.example\n"),
+            "LF leaked into CRLF file"
+        );
         let parsed = HostsText::parse(&fs.get(hosts).unwrap()).unwrap();
         assert_eq!(parsed.eol, Eol::Crlf);
         assert!(!parsed.bom);
@@ -480,7 +500,10 @@ mod tests {
             vec!["127.0.0.1 localhost", "::1 localhost", "10.0.0.5 nas"]
         );
         // Backup holds the untouched original.
-        assert_eq!(fs.get(out.backup.as_ref().unwrap()).unwrap(), HOSTS.as_bytes());
+        assert_eq!(
+            fs.get(out.backup.as_ref().unwrap()).unwrap(),
+            HOSTS.as_bytes()
+        );
     }
 
     #[test]
@@ -519,12 +542,7 @@ mod tests {
         let parsed = HostsText::parse(&fs.get(hosts).unwrap()).unwrap();
         assert_eq!(
             parsed.user_lines().unwrap(),
-            vec![
-                "# top",
-                "127.0.0.1 localhost",
-                "# bottom",
-                "10.0.0.9 nas"
-            ]
+            vec!["# top", "127.0.0.1 localhost", "# bottom", "10.0.0.9 nas"]
         );
         assert_eq!(parsed.lines[2], MARK_START, "block stayed in place");
     }
@@ -561,8 +579,8 @@ mod tests {
     #[test]
     fn missing_hosts_aborts_instead_of_writing_only_our_block() {
         let fs = MemFs::new();
-        let err = apply_block(&fs, Path::new("hosts"), Path::new("data"), "s", &entries())
-            .unwrap_err();
+        let err =
+            apply_block(&fs, Path::new("hosts"), Path::new("data"), "s", &entries()).unwrap_err();
         assert!(format!("{err:#}").contains("не удалось прочитать"));
         assert_eq!(fs.write_count(), 0);
     }
@@ -577,17 +595,17 @@ mod tests {
         assert!(format!("{err:#}").contains("не удалось записать"));
         assert_eq!(fs.get(hosts).unwrap(), HOSTS.as_bytes());
         // The backup was made before the failed write, so nothing was lost.
-        assert_eq!(
-            fs.text(Path::new("data/hosts.backup-s")).unwrap(),
-            HOSTS
-        );
+        assert_eq!(fs.text(Path::new("data/hosts.backup-s")).unwrap(), HOSTS);
     }
 
     #[test]
     fn unbalanced_markers_abort() {
         let fs = MemFs::new();
         let hosts = Path::new("hosts");
-        fs.put(hosts, format!("127.0.0.1 localhost\n{MARK_START}\n0.0.0.0 x\n"));
+        fs.put(
+            hosts,
+            format!("127.0.0.1 localhost\n{MARK_START}\n0.0.0.0 x\n"),
+        );
         let err = apply_block(&fs, hosts, Path::new("data"), "s", &entries()).unwrap_err();
         assert!(format!("{err:#}").contains("не закрыт"));
         assert_eq!(fs.write_count(), 0);
@@ -632,10 +650,7 @@ mod tests {
 0.0.0.0 printer.local
 ";
         let e = entries_from_list(raw);
-        assert_eq!(
-            e,
-            vec!["0.0.0.0 ads.example", "0.0.0.0 tracker.example"]
-        );
+        assert_eq!(e, vec!["0.0.0.0 ads.example", "0.0.0.0 tracker.example"]);
         assert!(validate_entries(&e).is_ok());
         assert!(validate_entries(&[format!("0.0.0.0 x\n{MARK_END}")]).is_err());
     }
@@ -654,7 +669,15 @@ mod tests {
 
     #[test]
     fn parse_render_roundtrip() {
-        for raw in ["", "\n", "a", "a\n", "a\r\nb\r\n", "\r\n\r\n", "x\r\ny\r\nz"] {
+        for raw in [
+            "",
+            "\n",
+            "a",
+            "a\n",
+            "a\r\nb\r\n",
+            "\r\n\r\n",
+            "x\r\ny\r\nz",
+        ] {
             let parsed = HostsText::parse(raw.as_bytes()).unwrap();
             assert_eq!(
                 String::from_utf8(parsed.render()).unwrap(),

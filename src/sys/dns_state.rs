@@ -153,7 +153,7 @@ impl DnsSnapshot {
     }
 
     /// Adapters we consider "in use": physical ones with a default gateway first,
-/// then any gateway adapter, then anything that is up.
+    /// then any gateway adapter, then anything that is up.
     ///
     /// Virtual adapters (VPN/TUN) come last on purpose: changing DNS on a tunnel
     /// can break the VPN, and the physical link is what actually resolves names
@@ -227,7 +227,9 @@ pub fn capture_and_save(dir: &Path, be: &dyn DnsBackend, tx: &str) -> Result<Dns
     write_snapshot(&path, &placeholder).context("не удалось записать заготовку снимка DNS")?;
 
     let mut snap = DnsSnapshot::empty(tx);
-    snap.interfaces = be.read_all().context("не удалось прочитать настройки DNS")?;
+    snap.interfaces = be
+        .read_all()
+        .context("не удалось прочитать настройки DNS")?;
     match be.read_doh() {
         Ok(state) => snap.doh = state,
         Err(e) => snap.doh_error = Some(format!("{e:#}")),
@@ -381,11 +383,10 @@ pub fn restore(be: &dyn DnsBackend, snap: &DnsSnapshot) -> Vec<ActionOutcome> {
             // (especially a VPN one) would add risk for nothing.
             let mut needs_work = false;
             for family in [Family::V4, Family::V6] {
-                if saved.dhcp(family) != live.dhcp(family) {
-                    needs_work = true;
-                } else if !saved.dhcp(family)
-                    && !same_servers(live.servers(family), saved.servers(family))
-                {
+                let differs = saved.dhcp(family) != live.dhcp(family)
+                    || (!saved.dhcp(family)
+                        && !same_servers(live.servers(family), saved.servers(family)));
+                if differs {
                     needs_work = true;
                 }
             }
@@ -505,7 +506,11 @@ pub fn verify_restored(be: &dyn DnsBackend, snap: &DnsSnapshot) -> Result<Vec<St
 ///
 /// `before` is the snapshot list. Servers present before get their old template
 /// and autoupgrade flag back; servers that were not there before are removed.
-pub fn restore_doh(be: &dyn DnsBackend, before: &[DohEntry], touched: &[String]) -> Vec<ActionOutcome> {
+pub fn restore_doh(
+    be: &dyn DnsBackend,
+    before: &[DohEntry],
+    touched: &[String],
+) -> Vec<ActionOutcome> {
     let mut out = Vec::new();
     for server in touched {
         match before.iter().find(|d| d.server == *server) {
@@ -622,7 +627,10 @@ impl DnsBackend for SystemDns {
 
     fn read_doh(&self) -> Result<DohState> {
         let v = crate::util::powershell_json(PS_READ_DOH, &[])?;
-        let supported = v.get("supported").and_then(|x| x.as_bool()).unwrap_or(false);
+        let supported = v
+            .get("supported")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
         let mut entries = Vec::new();
         for item in v
             .get("entries")
@@ -675,7 +683,10 @@ impl DnsBackend for SystemDns {
 
     fn remove_doh(&self, server: &str) -> Result<()> {
         let payload = serde_json::json!({ "server": server });
-        crate::util::powershell_json(PS_DOH_REMOVE, &[("OBHOD_P", &crate::util::b64_json(&payload))])?;
+        crate::util::powershell_json(
+            PS_DOH_REMOVE,
+            &[("OBHOD_P", &crate::util::b64_json(&payload))],
+        )?;
         Ok(())
     }
 }
@@ -953,8 +964,10 @@ mod tests {
             });
         }
         let before = be.doh.borrow().entries.clone();
-        be.add_doh("1.1.1.1", "https://new/dns-query", true).unwrap();
-        be.add_doh("9.9.9.9", "https://quad9/dns-query", true).unwrap();
+        be.add_doh("1.1.1.1", "https://new/dns-query", true)
+            .unwrap();
+        be.add_doh("9.9.9.9", "https://quad9/dns-query", true)
+            .unwrap();
         let outcomes = restore_doh(&be, &before, &["1.1.1.1".into(), "9.9.9.9".into()]);
         assert!(outcomes.iter().all(|o| o.ok), "{outcomes:?}");
         let doh = be.doh.borrow();
@@ -1012,7 +1025,8 @@ mod tests {
             });
         }
         let snap = capture_and_save(dir.path(), &be, "t").unwrap();
-        be.add_doh("1.1.1.1", "https://new/dns-query", true).unwrap();
+        be.add_doh("1.1.1.1", "https://new/dns-query", true)
+            .unwrap();
         be.add_doh("8.8.8.8", "https://dns.google/dns-query", true)
             .unwrap();
         restore_from_file(&snapshot_path(dir.path()), &be).unwrap();
@@ -1107,6 +1121,10 @@ mod tests {
             );
         }
         let doh = SystemDns.read_doh().expect("read_doh");
-        println!("DoH supported: {} entries: {}", doh.supported, doh.entries.len());
+        println!(
+            "DoH supported: {} entries: {}",
+            doh.supported,
+            doh.entries.len()
+        );
     }
 }

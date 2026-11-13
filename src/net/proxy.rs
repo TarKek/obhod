@@ -147,7 +147,9 @@ impl Failure {
             FailureKind::Connect => format!("соединение: {}", self.detail),
             FailureKind::Timeout => format!("таймаут ({}): {}", self.stage.ru(), self.detail),
             FailureKind::Tls => format!("TLS: {}", self.detail),
-            FailureKind::Closed => format!("соединение закрыто ({}): {}", self.stage.ru(), self.detail),
+            FailureKind::Closed => {
+                format!("соединение закрыто ({}): {}", self.stage.ru(), self.detail)
+            }
             FailureKind::Protocol => format!("ответ не по протоколу: {}", self.detail),
         }
     }
@@ -197,17 +199,19 @@ pub enum TlsReply {
 
 impl TlsReply {
     pub fn speaks_tls(&self) -> bool {
-        matches!(self, TlsReply::ServerHello { .. } | TlsReply::Handshake { .. })
+        matches!(
+            self,
+            TlsReply::ServerHello { .. } | TlsReply::Handshake { .. }
+        )
     }
 
     pub fn ru(&self) -> String {
         match self {
-            TlsReply::ServerHello { version } => format!("TLS ServerHello ({})", tls_version(*version)),
+            TlsReply::ServerHello { version } => {
+                format!("TLS ServerHello ({})", tls_version(*version))
+            }
             TlsReply::Handshake { kind } => format!("TLS handshake, тип {kind:#04x}"),
-            TlsReply::Alert {
-                level,
-                description,
-            } => format!(
+            TlsReply::Alert { level, description } => format!(
                 "TLS alert: {} ({description})",
                 alert_ru(*level, *description)
             ),
@@ -249,10 +253,7 @@ fn alert_ru(level: u8, description: u8) -> String {
         116 => "certificate_required",
         _ => "unknown",
     };
-    format!(
-        "{what}, {}",
-        if level == 1 { "warning" } else { "fatal" }
-    )
+    format!("{what}, {}", if level == 1 { "warning" } else { "fatal" })
 }
 
 #[derive(Clone, Debug)]
@@ -388,15 +389,7 @@ impl ProbeResult {
 pub fn probe_link(link: &str, cfg: &ProbeConfig) -> ProbeResult {
     let info = match links::parse(link) {
         Ok(i) => i,
-        Err(e) => {
-            return ProbeResult::failed(
-                "",
-                0,
-                None,
-                Failure::invalid(&e),
-                0,
-            )
-        }
+        Err(e) => return ProbeResult::failed("", 0, None, Failure::invalid(&e), 0),
     };
     probe_info(&info, cfg)
 }
@@ -437,12 +430,7 @@ pub fn probe_info(info: &LinkInfo, cfg: &ProbeConfig) -> ProbeResult {
 
 /// Low-level probe used by MTProto checks and tests: TCP first, then an
 /// optional TLS ClientHello on the same socket.
-pub fn probe_target(
-    host: &str,
-    port: u16,
-    sni: Option<&str>,
-    cfg: &ProbeConfig,
-) -> ProbeResult {
+pub fn probe_target(host: &str, port: u16, sni: Option<&str>, cfg: &ProbeConfig) -> ProbeResult {
     let mut result = ProbeResult::base(host, port, None);
     let addrs = match resolve(host, port) {
         Ok(a) => a,
@@ -479,17 +467,12 @@ pub fn probe_target(
                                     result.tls_verified = true;
                                     result.verdict = Verdict::TlsReachable;
                                 }
-                                TlsReply::Alert {
-                                    description, ..
-                                } => {
+                                TlsReply::Alert { description, .. } => {
                                     result.verdict = Verdict::Failed;
                                     result.failure = Some(Failure::new(
                                         FailureKind::Tls,
                                         Stage::Tls,
-                                        format!(
-                                            "сервер отклонил рукопожатие: {}",
-                                            tls.reply.ru()
-                                        ),
+                                        format!("сервер отклонил рукопожатие: {}", tls.reply.ru()),
                                     ));
                                     let _ = description;
                                 }
@@ -543,7 +526,12 @@ pub fn probe_target(
 /// TCP-only check for MTProto proxies. The secret is format-checked by
 /// [`links::normalize_mtproto_secret`]; the MTProto handshake is not
 /// implemented, so the verdict is always `PortOpen`.
-pub fn probe_mtproto(host: &str, port: u16, secret: Option<&str>, cfg: &ProbeConfig) -> ProbeResult {
+pub fn probe_mtproto(
+    host: &str,
+    port: u16,
+    secret: Option<&str>,
+    cfg: &ProbeConfig,
+) -> ProbeResult {
     if let Some(s) = secret {
         if links::normalize_mtproto_secret(s).is_none() {
             return ProbeResult::failed(
@@ -624,11 +612,7 @@ fn classify_connect(addr: &SocketAddr, e: &std::io::Error) -> Failure {
             Stage::Connect,
             format!("{addr}: соединение сброшено"),
         ),
-        _ => Failure::new(
-            FailureKind::Connect,
-            Stage::Connect,
-            format!("{addr}: {e}"),
-        ),
+        _ => Failure::new(FailureKind::Connect, Stage::Connect, format!("{addr}: {e}")),
     }
 }
 
@@ -984,7 +968,7 @@ mod tests {
         let rec_len = u16::from_be_bytes([hello[3], hello[4]]) as usize;
         assert_eq!(rec_len + 5, hello.len());
         assert_eq!(hello[5], 0x01); // ClientHello
-        // 24-bit handshake length
+                                    // 24-bit handshake length
         let hs_len = ((hello[6] as usize) << 16) | ((hello[7] as usize) << 8) | hello[8] as usize;
         assert_eq!(hs_len + 9, hello.len());
         assert!(hello.windows(12).any(|w| w == b"host.example"));

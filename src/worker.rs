@@ -29,7 +29,9 @@ pub fn spawn_demo() -> Receiver<Msg> {
             std::thread::sleep(std::time::Duration::from_millis(900));
         }
         let _ = tx.send(Msg::Progress(100, "готово".into()));
-        let _ = tx.send(Msg::Log("✓ Это был демо-режим. Реальная система не изменена.".into()));
+        let _ = tx.send(Msg::Log(
+            "✓ Это был демо-режим. Реальная система не изменена.".into(),
+        ));
         let _ = tx.send(Msg::Done(true));
     });
     rx

@@ -74,7 +74,11 @@ impl Protocol {
     pub fn tls_capable(self) -> bool {
         matches!(
             self,
-            Protocol::Vless | Protocol::Trojan | Protocol::Vmess | Protocol::Hysteria2 | Protocol::Tuic
+            Protocol::Vless
+                | Protocol::Trojan
+                | Protocol::Vmess
+                | Protocol::Hysteria2
+                | Protocol::Tuic
         )
     }
 
@@ -287,7 +291,10 @@ fn validate_host(host: &str) -> Result<(), LinkError> {
         .chars()
         .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '/' | '\\' | '@' | '#' | '?'))
     {
-        return Err(LinkError::new("host", "недопустимые символы в имени сервера"));
+        return Err(LinkError::new(
+            "host",
+            "недопустимые символы в имени сервера",
+        ));
     }
     Ok(())
 }
@@ -389,11 +396,7 @@ fn pick_name(fragment: &str, fallback: &str) -> String {
     }
 }
 
-fn sni_from(
-    q: &HashMap<String, String>,
-    host: &str,
-    tls: bool,
-) -> (Option<String>, Vec<String>) {
+fn sni_from(q: &HashMap<String, String>, host: &str, tls: bool) -> (Option<String>, Vec<String>) {
     let mut warnings = Vec::new();
     let mut sni = q
         .get("sni")
@@ -562,8 +565,7 @@ fn parse_ss(rest: &str) -> Result<LinkInfo, LinkError> {
     };
     let (cred, hostport) = if let Some((u, h)) = before_frag.rsplit_once('@') {
         (
-            b64_decode_text(u)
-                .ok_or_else(|| LinkError::new("userinfo", "ss: логин не base64"))?,
+            b64_decode_text(u).ok_or_else(|| LinkError::new("userinfo", "ss: логин не base64"))?,
             h.to_string(),
         )
     } else {
@@ -664,8 +666,7 @@ fn parse_tuic(rest: &str) -> Result<LinkInfo, LinkError> {
     if uuid.trim().is_empty() || password.is_empty() {
         return Err(LinkError::new("userinfo", "tuic: пустой uuid или пароль"));
     }
-    let mut warnings =
-        vec!["TUIC: нужен внешний клиент, проверка не выполнялась".to_string()];
+    let mut warnings = vec!["TUIC: нужен внешний клиент, проверка не выполнялась".to_string()];
     if !is_uuid(uuid) {
         warnings.push("uuid не похож на UUID".into());
     }
@@ -687,10 +688,7 @@ fn parse_tuic(rest: &str) -> Result<LinkInfo, LinkError> {
 fn parse_tg(rest: &str) -> Result<LinkInfo, LinkError> {
     // tg://proxy?server=...&port=...&secret=...
     let (before_frag, fragment) = rest.split_once('#').unwrap_or((rest, ""));
-    let query = before_frag
-        .split_once('?')
-        .map(|(_, q)| q)
-        .unwrap_or("");
+    let query = before_frag.split_once('?').map(|(_, q)| q).unwrap_or("");
     parse_mtproto_fields(&parse_query(query), fragment)
 }
 
@@ -700,10 +698,7 @@ fn parse_tme(rest: &str) -> Result<LinkInfo, LinkError> {
         return Err(LinkError::new("link", "поддерживается только t.me/proxy"));
     }
     let (before_frag, fragment) = rest.split_once('#').unwrap_or((rest, ""));
-    let query = before_frag
-        .split_once('?')
-        .map(|(_, q)| q)
-        .unwrap_or("");
+    let query = before_frag.split_once('?').map(|(_, q)| q).unwrap_or("");
     parse_mtproto_fields(&parse_query(query), fragment)
 }
 
@@ -830,10 +825,7 @@ mod tests {
 
     #[test]
     fn vless_rejects_broken_structure() {
-        assert_eq!(
-            parse("vless://@host:443").unwrap_err().field,
-            "id"
-        );
+        assert_eq!(parse("vless://@host:443").unwrap_err().field, "id");
         assert_eq!(
             parse(&format!("vless://{UUID}@host:0")).unwrap_err().field,
             "port"

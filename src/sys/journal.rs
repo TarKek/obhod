@@ -100,9 +100,7 @@ pub trait UndoExecutor {
 pub fn apply_undo(undo: &Undo, ex: &dyn UndoExecutor) -> Result<()> {
     match undo {
         Undo::None => Ok(()),
-        Undo::RestoreFile { path, backup } => {
-            ex.restore_file(Path::new(path), Path::new(backup))
-        }
+        Undo::RestoreFile { path, backup } => ex.restore_file(Path::new(path), Path::new(backup)),
         Undo::DeleteFile { path } => ex.delete_file(Path::new(path)),
         Undo::RestoreDns { snapshot } => ex.restore_dns(Path::new(snapshot)),
         Undo::DeleteService { name } => ex.delete_service(name),
@@ -200,7 +198,10 @@ impl Journal {
                 let _ = std::fs::rename(&path, self.dir.join(format!("{JOURNAL_FILE}.1")));
             }
         }
-        let seq = self.read_records().map(|v| v.last().map(|r| r.seq + 1).unwrap_or(1)).unwrap_or(1);
+        let seq = self
+            .read_records()
+            .map(|v| v.last().map(|r| r.seq + 1).unwrap_or(1))
+            .unwrap_or(1);
         rec.seq = seq;
         let mut line = serde_json::to_string(&rec)?;
         line.push('\n');
@@ -234,10 +235,7 @@ impl Journal {
                 Err(_) => {
                     // Only the last line may be torn by a crash; ignore it.
                     if i + 1 != lines.len() {
-                        crate::logger::info(format!(
-                            "journal: пропущена битая строка {}",
-                            i + 1
-                        ));
+                        crate::logger::info(format!("journal: пропущена битая строка {}", i + 1));
                     }
                 }
             }
@@ -393,9 +391,7 @@ pub fn recover_pending_with(journal: &Journal, ex: &dyn UndoExecutor) -> Result<
             })?;
         } else {
             let reason = problems.join("; ");
-            report
-                .failed
-                .push((st.tx.clone(), reason.clone()));
+            report.failed.push((st.tx.clone(), reason.clone()));
             report.log.push(format!(
                 "⚠ не удалось отменить «{}»: {reason}",
                 st.component
@@ -473,8 +469,14 @@ mod tests {
         j.append(rec("t1", Phase::Apply, "do", Undo::None, Status::Ok))
             .unwrap();
         assert_eq!(j.pending().unwrap().len(), 1);
-        j.append(rec("t1", Phase::Commit, ACTION_COMMIT, Undo::None, Status::Ok))
-            .unwrap();
+        j.append(rec(
+            "t1",
+            Phase::Commit,
+            ACTION_COMMIT,
+            Undo::None,
+            Status::Ok,
+        ))
+        .unwrap();
         assert!(j.pending().unwrap().is_empty());
         assert_eq!(j.states().unwrap()[0].status, TxStatus::Committed);
     }
@@ -523,7 +525,10 @@ mod tests {
                 Ok(())
             }
             fn delete_file(&self, path: &Path) -> Result<()> {
-                self.calls.lock().unwrap().push(format!("del {}", path.display()));
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("del {}", path.display()));
                 Ok(())
             }
             fn restore_dns(&self, snapshot: &Path) -> Result<()> {
@@ -589,10 +594,7 @@ mod tests {
         assert_eq!(rep.recovered, vec!["t1".to_string()]);
         assert_eq!(
             ex.calls.lock().unwrap().clone(),
-            vec![
-                "svc zapret".to_string(),
-                "restore H<-H.bak".to_string()
-            ]
+            vec!["svc zapret".to_string(), "restore H<-H.bak".to_string()]
         );
 
         // Second pass: the transaction has a terminal record now.

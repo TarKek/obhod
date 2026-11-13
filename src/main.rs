@@ -65,7 +65,10 @@ fn main() {
     }
     if args.iter().any(|a| a == "--self-update") {
         match selfupdate::check() {
-            Ok(Some(tag)) => println!("доступна версия {tag} (сейчас {})", selfupdate::current_version()),
+            Ok(Some(tag)) => println!(
+                "доступна версия {tag} (сейчас {})",
+                selfupdate::current_version()
+            ),
             Ok(None) => println!("обновлений нет ({})", selfupdate::current_version()),
             Err(e) => eprintln!("obhod: не удалось проверить обновления: {e:#}"),
         }
@@ -99,7 +102,12 @@ fn main() {
         return;
     }
 
-    if !mode.is_demo() && !util::is_admin() && !args.iter().any(|a| a == "--elevated" || a == "--no-elevate") {
+    if !mode.is_demo()
+        && !util::is_admin()
+        && !args
+            .iter()
+            .any(|a| a == "--elevated" || a == "--no-elevate")
+    {
         let mut extra = args.clone();
         extra.push("--elevated".to_string());
         match util::relaunch_elevated(&extra) {
@@ -219,10 +227,30 @@ fn demo_static(mode: app::Mode) {
         if matches!(screen, app::Screen::History) {
             use crate::core::history::HistoryEntry;
             app.history.entries = vec![
-                HistoryEntry::new("setup", "Включено: обход и Telegram", "Turned on: bypass and Telegram", true),
-                HistoryEntry::new("check", "Проверка сети: 5 из 5", "Network check: 5 of 5", true),
-                HistoryEntry::new("update", "Обновлены подписки", "Subscriptions updated", true),
-                HistoryEntry::new("off", "Выключено, DNS возвращён", "Turned off, DNS restored", true),
+                HistoryEntry::new(
+                    "setup",
+                    "Включено: обход и Telegram",
+                    "Turned on: bypass and Telegram",
+                    true,
+                ),
+                HistoryEntry::new(
+                    "check",
+                    "Проверка сети: 5 из 5",
+                    "Network check: 5 of 5",
+                    true,
+                ),
+                HistoryEntry::new(
+                    "update",
+                    "Обновлены подписки",
+                    "Subscriptions updated",
+                    true,
+                ),
+                HistoryEntry::new(
+                    "off",
+                    "Выключено, DNS возвращён",
+                    "Turned off, DNS restored",
+                    true,
+                ),
             ];
         }
         if matches!(screen, app::Screen::Check) {
@@ -339,8 +367,6 @@ fn selftest() {
             autostart: cfg.autostart,
             service_mode: cfg.service_mode,
             hosts_block_ads: cfg.hosts_block_ads,
-            autoupdate_days: cfg.autoupdate_days,
-            reminders: cfg.reminders,
             telemetry: cfg.telemetry,
             repo: cfg.repo.clone(),
             keep_zapret: false,
@@ -368,7 +394,12 @@ fn selftest() {
     }
     let profiles = core::ProfileStore::load(&cfg.data_dir());
     println!("profiles     : {}", profiles.profiles.len());
-    println!("history file : {}", core::history::History::load(&cfg.data_dir(), 5).entries.len());
+    println!(
+        "history file : {}",
+        core::history::History::load(&cfg.data_dir(), 5)
+            .entries
+            .len()
+    );
     println!("config file  : {}", config::Config::path().display());
     println!("brand file   : {}", brand::path().display());
     println!("brand name   : {}", brand::name());
@@ -392,11 +423,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal, mode: app::Mode) -> anyhow::Resu
         if crossterm::event::poll(Duration::from_millis(120))? {
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                 if key.kind == crossterm::event::KeyEventKind::Press {
-                    logger::info(format!(
-                        "key {:?} @ {}",
-                        key.code,
-                        app.screen_name()
-                    ));
+                    logger::info(format!("key {:?} @ {}", key.code, app.screen_name()));
                     app.on_key(key.code);
                     let now = app.screen_name();
                     if now != last_screen {

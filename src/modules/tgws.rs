@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use crate::modules::Ctx;
+use crate::sys::proc::ProcBackend;
 use crate::util;
 
 const REPO: &str = "Flowseal/tg-ws-proxy";
@@ -18,7 +19,10 @@ pub fn run_from(ctx: &Ctx, provided: Option<&Path>) -> Result<()> {
 
     if provided.is_none() && ctx.opts.keep_tgws {
         if let Some(p) = find_existing() {
-            ctx.log(format!("TgWsProxy уже есть — использую его: {}", p.display()));
+            ctx.log(format!(
+                "TgWsProxy уже есть — использую его: {}",
+                p.display()
+            ));
             let _ = std::process::Command::new(&p)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -51,7 +55,10 @@ pub fn run_from(ctx: &Ctx, provided: Option<&Path>) -> Result<()> {
         },
     };
 
-    // TgWsProxy is a GUI bridge; start it detached.
+    // Record which process we spawn: stop/update may only kill our own copy.
+    let before = crate::sys::proc::SystemProcs
+        .list("TgWsProxy.exe")
+        .unwrap_or_default();
     let mut c = std::process::Command::new(&exe);
     use std::os::windows::process::CommandExt;
     c.creation_flags(util::CREATE_NO_WINDOW)
@@ -59,7 +66,15 @@ pub fn run_from(ctx: &Ctx, provided: Option<&Path>) -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     match c.spawn() {
-        Ok(_) => ctx.log("✓ TgWsProxy запущен (запасной путь для Telegram)."),
+        Ok(_) => {
+            ctx.log("✓ TgWsProxy запущен (запасной путь для Telegram).");
+            let _ = crate::sys::proc::record_new(
+                &ctx.data,
+                &crate::sys::proc::SystemProcs,
+                "TgWsProxy.exe",
+                &before,
+            );
+        }
         Err(e) => ctx.log(format!("⚠ не удалось запустить TgWsProxy: {e}")),
     }
 
@@ -72,7 +87,18 @@ pub fn run_from(ctx: &Ctx, provided: Option<&Path>) -> Result<()> {
             "TgWsProxy",
             &val,
         ) {
-            Ok(_) => ctx.log("✓ TgWsProxy добавлен в автозагрузку"),
+            Ok(_) => {
+                ctx.log("✓ TgWsProxy добавлен в автозагрузку");
+                let _ = crate::sys::proc::own_run_value(
+                    &ctx.data,
+                    &crate::sys::proc::RunValue {
+                        root: "HKCU".into(),
+                        path: r"Software\Microsoft\Windows\CurrentVersion\Run".into(),
+                        name: "TgWsProxy".into(),
+                        value: val,
+                    },
+                );
+            }
             Err(e) => ctx.log(format!("⚠ автозагрузка TgWsProxy: {e}")),
         }
     }

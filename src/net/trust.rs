@@ -126,8 +126,7 @@ impl ManifestCheck {
 
 /// Parses manifest bytes into the structured form.
 pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
-    serde_json::from_slice::<Manifest>(bytes)
-        .map_err(|e| format!("манифест не читается: {e}"))
+    serde_json::from_slice::<Manifest>(bytes).map_err(|e| format!("манифест не читается: {e}"))
 }
 
 /// Verifies the detached Ed25519 signature of `manifest_bytes`.
@@ -142,10 +141,12 @@ pub fn verify_signature(
 
     let key_raw =
         b64_decode(pubkey_b64.trim()).ok_or_else(|| "публичный ключ не base64".to_string())?;
-    let key_arr: [u8; 32] = key_raw
-        .as_slice()
-        .try_into()
-        .map_err(|_| format!("публичный ключ должен быть 32 байта, а не {}", key_raw.len()))?;
+    let key_arr: [u8; 32] = key_raw.as_slice().try_into().map_err(|_| {
+        format!(
+            "публичный ключ должен быть 32 байта, а не {}",
+            key_raw.len()
+        )
+    })?;
     let key = VerifyingKey::from_bytes(&key_arr)
         .map_err(|e| format!("публичный ключ не Ed25519: {e}"))?;
 
@@ -182,9 +183,7 @@ pub fn verify_manifest_bytes(
     // --- integrity ------------------------------------------------------
     let expected = match normalize_sha256(&manifest.sha256) {
         Some(h) => h,
-        None => {
-            return ManifestCheck::reject("в манифесте нет корректного sha256", Some(manifest))
-        }
+        None => return ManifestCheck::reject("в манифесте нет корректного sha256", Some(manifest)),
     };
     let actual = normalize_sha256(actual_sha256).unwrap_or_default();
     if expected != actual {

@@ -38,7 +38,10 @@ pub fn is_admin() -> bool {
 }
 
 fn wide(p: &Path) -> Vec<u16> {
-    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// Returns (free_percent, free_bytes, total_bytes) for the volume of `p`.
@@ -57,7 +60,8 @@ pub fn disk_stats(p: &Path) -> (f64, u64, u64) {
     let mut free_caller: u64 = 0;
     let mut total: u64 = 0;
     let mut free_total: u64 = 0;
-    let ok = unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut free_caller, &mut total, &mut free_total) };
+    let ok =
+        unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut free_caller, &mut total, &mut free_total) };
     if ok == 0 || total == 0 {
         return (100.0, 0, 0);
     }
@@ -170,7 +174,14 @@ pub fn powershell_json(script: &str, env: &[(&str, &str)]) -> Result<serde_json:
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         anyhow::bail!(
             "PowerShell завершился с ошибкой: {}",
-            truncate(if err.is_empty() { "без текста ошибки" } else { &err }, 400)
+            truncate(
+                if err.is_empty() {
+                    "без текста ошибки"
+                } else {
+                    &err
+                },
+                400
+            )
         );
     }
     let text = String::from_utf8_lossy(&out.stdout);
@@ -178,8 +189,12 @@ pub fn powershell_json(script: &str, env: &[(&str, &str)]) -> Result<serde_json:
     let start = text
         .find(['[', '{'])
         .ok_or_else(|| anyhow::anyhow!("PowerShell ничего не вернул"))?;
-    serde_json::from_str::<serde_json::Value>(&text[start..])
-        .with_context(|| format!("не удалось разобрать ответ PowerShell: {}", truncate(text, 200)))
+    serde_json::from_str::<serde_json::Value>(&text[start..]).with_context(|| {
+        format!(
+            "не удалось разобрать ответ PowerShell: {}",
+            truncate(text, 200)
+        )
+    })
 }
 
 /// Base64 of the JSON encoding of `v`, for [`powershell`] payloads.
@@ -328,7 +343,10 @@ pub fn reg_get_string(root: &str, path: &str, name: &str) -> Result<Option<Strin
     if !out.status.success() {
         return Ok(None);
     }
-    Ok(parse_reg_query_value(&String::from_utf8_lossy(&out.stdout), name))
+    Ok(parse_reg_query_value(
+        &String::from_utf8_lossy(&out.stdout),
+        name,
+    ))
 }
 
 fn validate_reg_args(root: &str, path: &str, name: &str) -> Result<()> {
@@ -665,7 +683,10 @@ pub fn reg_set_string(root: &str, path: &str, name: &str, value: &str) -> Result
 /// (delete is idempotent, `off` retries steps).
 pub fn reg_delete_value(root: &str, path: &str, name: &str) -> Result<()> {
     validate_reg_args(root, path, name)?;
-    let out = hidden_str("reg", &["delete", &format!("{root}\\{path}"), "/v", name, "/f"])?;
+    let out = hidden_str(
+        "reg",
+        &["delete", &format!("{root}\\{path}"), "/v", name, "/f"],
+    )?;
     if out.status.success() {
         return Ok(());
     }
@@ -758,7 +779,10 @@ mod tests {
     #[test]
     fn quote_leaves_simple_args_untouched() {
         assert_eq!(quote_win_arg("--filter-tcp=80"), "--filter-tcp=80");
-        assert_eq!(quote_win_arg("C:\\zapret\\bin\\winws.exe"), "C:\\zapret\\bin\\winws.exe");
+        assert_eq!(
+            quote_win_arg("C:\\zapret\\bin\\winws.exe"),
+            "C:\\zapret\\bin\\winws.exe"
+        );
         assert_eq!(quote_win_arg("a b"), "\"a b\"");
     }
 
@@ -793,10 +817,16 @@ mod tests {
             parse_reg_query_value(out, "TgWsProxy").as_deref(),
             Some("\"C:\\tools\\TgWsProxy.exe\"")
         );
-        assert_eq!(parse_reg_query_value(out, "tgwsproxy").as_deref(), Some("\"C:\\tools\\TgWsProxy.exe\""));
+        assert_eq!(
+            parse_reg_query_value(out, "tgwsproxy").as_deref(),
+            Some("\"C:\\tools\\TgWsProxy.exe\"")
+        );
         assert_eq!(parse_reg_query_value(out, "obhod"), None);
         // A header line that merely contains the name must not match.
-        assert_eq!(parse_reg_query_value("HKEY_CURRENT_USER\\Run\\TgWsProxy\r\n", "TgWsProxy"), None);
+        assert_eq!(
+            parse_reg_query_value("HKEY_CURRENT_USER\\Run\\TgWsProxy\r\n", "TgWsProxy"),
+            None
+        );
     }
 
     #[test]
@@ -813,7 +843,10 @@ mod tests {
         let err = run_checked("reg", &["query", r"HKLM\Software\__obhod_missing_key__"])
             .expect_err("missing registry key must fail");
         let msg = format!("{err:#}");
-        assert!(msg.contains("код"), "message should mention the code: {msg}");
+        assert!(
+            msg.contains("код"),
+            "message should mention the code: {msg}"
+        );
     }
 
     #[test]
@@ -847,8 +880,11 @@ mod tests {
     fn powershell_gets_the_payload_through_the_environment() {
         // End-to-end check of the payload channel: the script must see $p.text.
         let payload = b64_json(&serde_json::json!({ "text": "привет ' \" & </script>" }));
-        let v = powershell_json("[pscustomobject]@{ ok = $p.text } | ConvertTo-Json -Compress", &[("OBHOD_P", &payload)])
-            .expect("powershell payload");
+        let v = powershell_json(
+            "[pscustomobject]@{ ok = $p.text } | ConvertTo-Json -Compress",
+            &[("OBHOD_P", &payload)],
+        )
+        .expect("powershell payload");
         assert_eq!(
             v.get("ok").and_then(|x| x.as_str()),
             Some("привет ' \" & </script>")

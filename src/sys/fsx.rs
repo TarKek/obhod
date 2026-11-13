@@ -101,10 +101,7 @@ pub fn temp_sibling(path: &Path) -> PathBuf {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "tmp".to_string());
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    dir.join(format!(
-        ".{name}.obhod-tmp-{}-{seq}",
-        std::process::id()
-    ))
+    dir.join(format!(".{name}.obhod-tmp-{}-{seq}", std::process::id()))
 }
 
 /// Atomic file replace: temp file in the same directory, fsync, rename.
@@ -141,8 +138,7 @@ pub fn read_text(io: &dyn FsIo, path: &Path) -> Result<String> {
     let bytes = io
         .read(path)
         .with_context(|| format!("не удалось прочитать {}", path.display()))?;
-    String::from_utf8(bytes)
-        .with_context(|| format!("{} не в кодировке UTF-8", path.display()))
+    String::from_utf8(bytes).with_context(|| format!("{} не в кодировке UTF-8", path.display()))
 }
 
 /// Copies `src` to `dst` without ever clobbering an existing backup.
@@ -207,7 +203,8 @@ pub(crate) mod testing {
         }
 
         pub fn text(&self, path: &Path) -> Option<String> {
-            self.get(path).map(|b| String::from_utf8_lossy(&b).to_string())
+            self.get(path)
+                .map(|b| String::from_utf8_lossy(&b).to_string())
         }
 
         pub fn write_count(&self) -> usize {

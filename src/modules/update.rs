@@ -7,7 +7,20 @@ use std::process::Command;
 use crate::modules::{clients, detect, Ctx};
 use crate::net::{sha256_file, trust};
 use crate::state::{now_secs, State};
+use crate::sys::proc;
 use crate::util;
+
+/// Stops only processes that obhod spawned and recorded in its ownership
+/// ledger. Foreign copies (a user's Happ, another TgWsProxy) are left alone.
+fn stop_owned(ctx: &Ctx, image: &str) {
+    let be = proc::SystemProcs;
+    let owned = proc::owned_alive(&ctx.data, &be, image).unwrap_or_default();
+    for p in owned {
+        if let Err(e) = proc::kill_owned(&be, image, p.pid, &p.exe) {
+            ctx.log(format!("⚠ не удалось остановить свой {image}: {e:#}"));
+        }
+    }
+}
 
 pub struct Tool {
     pub id: &'static str,
@@ -184,7 +197,10 @@ fn check_exe(path: &Path, expected_sha: Option<&str>) -> Result<String> {
         bail!("файл {} пуст", path.display());
     }
     if !is_windows_exe(path) {
-        bail!("файл {} не является программой Windows (нет MZ)", path.display());
+        bail!(
+            "файл {} не является программой Windows (нет MZ)",
+            path.display()
+        );
     }
     let sha = sha256_file(path)?;
     if let Some(exp) = expected_sha {
@@ -271,8 +287,7 @@ fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
         if from.is_dir() {
             copy_tree(&from, &to)?;
         } else {
-            fs::copy(&from, &to)
-                .with_context(|| format!("копирование {}", from.display()))?;
+            fs::copy(&from, &to).with_context(|| format!("копирование {}", from.display()))?;
         }
     }
     Ok(())
@@ -348,8 +363,7 @@ pub fn install_exe(staged: &Staging, target: &Path, backup_root: &Path) -> Resul
     let moved = if target.exists() {
         if let Err(e) = fs::rename(target, &old) {
             let _ = fs::remove_file(&tmp);
-            return Err(e)
-                .with_context(|| format!("не удалось отодвинуть {}", target.display()));
+            return Err(e).with_context(|| format!("не удалось отодвинуть {}", target.display()));
         }
         true
     } else {
@@ -677,7 +691,10 @@ pub fn update_tools(ctx: &Ctx) -> Result<()> {
                     .unwrap_or_else(|| "C:\\zapret".into());
                 match (&app.version, zapret_latest(&client, app)) {
                     (Some(v), Some((tag, src))) if version_current(v, &tag) => {
-                        ctx.log(format!("• zapret: {} — актуально ({loc} · {src})", short(v)));
+                        ctx.log(format!(
+                            "• zapret: {} — актуально ({loc} · {src})",
+                            short(v)
+                        ));
                     }
                     (Some(v), Some((tag, src))) => {
                         ctx.log(format!(
@@ -734,9 +751,7 @@ pub fn update_tools(ctx: &Ctx) -> Result<()> {
                         }
                         ctx.log("✓ zapret обновлён.");
                     }
-                    Err(e) => ctx.log(format!(
-                        "⚠ zapret скачан, но настроить не удалось: {e:#}"
-                    )),
+                    Err(e) => ctx.log(format!("⚠ zapret скачан, но настроить не удалось: {e:#}")),
                 },
                 Err(e) => ctx.log(format!(
                     "⚠ zapret: {e:#}. Прежняя копия сохранена и не тронута."
@@ -851,7 +866,10 @@ fn update_found_happ(
     ctx.progress(65, "Happ".to_string());
     ctx.log(format!(
         "Обновляю Happ {} → {} в {}",
-        app.version.as_deref().map(short).unwrap_or_else(|| "?".into()),
+        app.version
+            .as_deref()
+            .map(short)
+            .unwrap_or_else(|| "?".into()),
         short(&latest),
         dir.display()
     ));
@@ -868,10 +886,15 @@ fn update_found_happ(
             return false;
         }
     };
-    // The installer cannot replace files of a running app.
-    let _ = util::hidden_str("taskkill", &["/IM", "Happ.exe", "/F"]);
+    // The installer cannot replace files of a running app. Stop only a copy
+    // that obhod itself started; a user-installed Happ is never killed.
+    stop_owned(ctx, "Happ.exe");
     let arg = format!("/D={}", dir.display());
-    let status = Command::new(&setup).arg("/S").arg(&arg).spawn().and_then(|mut c| c.wait());
+    let status = Command::new(&setup)
+        .arg("/S")
+        .arg(&arg)
+        .spawn()
+        .and_then(|mut c| c.wait());
     match status {
         Ok(s) if s.success() => {
             st.set_tool("client_happ", &latest);
@@ -917,7 +940,10 @@ fn update_found_tgws(
     ctx.progress(45, "TgWsProxy".to_string());
     ctx.log(format!(
         "Обновляю TgWsProxy {} → {} ({})",
-        app.version.as_deref().map(short).unwrap_or_else(|| "?".into()),
+        app.version
+            .as_deref()
+            .map(short)
+            .unwrap_or_else(|| "?".into()),
         short(&latest),
         path.display()
     ));
@@ -937,14 +963,12 @@ fn update_found_tgws(
     let staged = match prepare_from_exe(&new_exe, &ctx.dir("staging"), None) {
         Ok(s) => s,
         Err(e) => {
-            ctx.log(format!(
-                "⚠ TgWsProxy: {e:#}. Текущая версия не тронута."
-            ));
+            ctx.log(format!("⚠ TgWsProxy: {e:#}. Текущая версия не тронута."));
             return false;
         }
     };
     if app.running {
-        let _ = util::hidden_str("taskkill", &["/IM", "TgWsProxy.exe", "/F"]);
+        stop_owned(ctx, "TgWsProxy.exe");
     }
     match install_exe(&staged, path, &ctx.dir("backup")) {
         Ok(report) => {
@@ -1071,9 +1095,7 @@ mod tests {
         let good = dir.path().join("good.exe");
         fs::write(&good, fake_exe(b"x")).unwrap();
         let wrong = "0".repeat(64);
-        assert!(
-            prepare_from_exe(&good, &dir.path().join("staging"), Some(&wrong)).is_err()
-        );
+        assert!(prepare_from_exe(&good, &dir.path().join("staging"), Some(&wrong)).is_err());
 
         // Nothing left behind by the failed attempts.
         let leftovers = fs::read_dir(dir.path().join("staging"))

@@ -148,26 +148,9 @@ impl ComponentStatus {
     }
 }
 
-/// What the user asked for. Emitted by screens, handled by one place.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Action {
-    Setup,
-    TurnOff,
-    Check,
-    Update,
-    ApplyProfile(String),
-    OpenSection(&'static str),
-}
-
-/// Something that happened. Used to keep the UI and the history in sync.
+/// A probe result. Screens emit it; one place applies it to the state.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Event {
-    Started(Action),
-    Finished {
-        action: Action,
-        ok: bool,
-        detail: String,
-    },
     Probe {
         component: Component,
         phase: Phase,
@@ -180,8 +163,6 @@ pub enum Event {
 #[derive(Clone, Debug)]
 pub struct CoreState {
     statuses: BTreeMap<Component, ComponentStatus>,
-    pub last_action: Option<Action>,
-    pub last_error: Option<String>,
 }
 
 impl Default for CoreState {
@@ -196,11 +177,7 @@ impl CoreState {
         for c in Component::all() {
             statuses.insert(c, ComponentStatus::unknown(c));
         }
-        Self {
-            statuses,
-            last_action: None,
-            last_error: None,
-        }
+        Self { statuses }
     }
 
     pub fn status(&self, c: Component) -> &ComponentStatus {
@@ -210,38 +187,19 @@ impl CoreState {
             .expect("component status is always seeded")
     }
 
-    pub fn statuses(&self) -> impl Iterator<Item = &ComponentStatus> {
-        self.statuses.values()
-    }
-
     pub fn set(&mut self, c: Component, phase: Phase, detail: &str, latency_ms: Option<u32>) {
-        let now = now_secs();
-        if let Some(s) = self.statuses.get_mut(&c) {
-            s.phase = phase;
-            s.detail_ru = detail.to_string();
-            s.detail_en = detail.to_string();
-            s.latency_ms = latency_ms;
-            s.last_check = Some(now);
-            if phase == Phase::Operational {
-                s.last_ok = Some(now);
-                s.failures = 0;
-            } else if phase.is_problem() {
-                s.failures = s.failures.saturating_add(1);
-            }
-        }
+        let detail = detail.to_string();
+        self.apply(Event::Probe {
+            component: c,
+            phase,
+            detail_ru: detail.clone(),
+            detail_en: detail,
+            latency_ms,
+        });
     }
 
     pub fn apply(&mut self, event: Event) {
         match event {
-            Event::Started(action) => {
-                self.last_action = Some(action);
-            }
-            Event::Finished { action, ok, detail } => {
-                self.last_action = Some(action);
-                if !ok {
-                    self.last_error = Some(detail);
-                }
-            }
             Event::Probe {
                 component,
                 phase,
@@ -282,10 +240,10 @@ impl CoreState {
         if phases.iter().all(|p| *p == Phase::Unknown) {
             return Phase::Unknown;
         }
-        if phases.iter().any(|p| *p == Phase::Failed) {
+        if phases.contains(&Phase::Failed) {
             return Phase::Failed;
         }
-        if phases.iter().any(|p| *p == Phase::Degraded) {
+        if phases.contains(&Phase::Degraded) {
             return Phase::Degraded;
         }
         if phases.iter().any(|p| p.is_working()) {

@@ -208,8 +208,6 @@ pub fn evaluate(sig: &Signals, now: u64) -> HealthReport {
         None
     } else if sig.proxy_running && sig.proxy_verified {
         Some(true)
-    } else if sig.proxy_running {
-        Some(false)
     } else {
         Some(false)
     };

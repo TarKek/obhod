@@ -269,7 +269,11 @@ impl App {
             if !rep.is_clean() {
                 app.status_msg = Some(format!(
                     "{}: {}",
-                    tr(&app.cfg.lang, "Восстановлено после сбоя", "Recovered after a crash"),
+                    tr(
+                        &app.cfg.lang,
+                        "Восстановлено после сбоя",
+                        "Recovered after a crash"
+                    ),
                     rep.log.len()
                 ));
             }
@@ -280,6 +284,13 @@ impl App {
                 tx,
             );
             app.bg_rx = Some(rx);
+        }
+        if let Some(err) = Config::take_load_error() {
+            crate::logger::info(format!("config: {err}"));
+            app.status_msg = Some(format!(
+                "{}: {err}",
+                tr(&app.cfg.lang, "Настройки", "Settings")
+            ));
         }
         app.refresh_health();
         app.proxies = NodeStore::load(&data_dir.join("proxy-nodes.json")).0;
@@ -394,18 +405,25 @@ impl App {
             .to_string(),
             Health::Partial => {
                 let gap = if !self.svc_on && self.tg_on {
-                    tr(lang, "обход выключен, Telegram готов", "bypass off, Telegram ready")
+                    tr(
+                        lang,
+                        "обход выключен, Telegram готов",
+                        "bypass off, Telegram ready",
+                    )
                 } else {
-                    tr(lang, "обход работает, Telegram без прокси", "bypass on, no Telegram proxy")
+                    tr(
+                        lang,
+                        "обход работает, Telegram без прокси",
+                        "bypass on, no Telegram proxy",
+                    )
                 };
-                format!("{}{}", tr(lang, "Включено частично — ", "Partly on - "), gap)
+                format!(
+                    "{}{}",
+                    tr(lang, "Включено частично — ", "Partly on - "),
+                    gap
+                )
             }
-            Health::Off => tr(
-                lang,
-                "Сейчас выключено",
-                "Currently off",
-            )
-            .to_string(),
+            Health::Off => tr(lang, "Сейчас выключено", "Currently off").to_string(),
         }
     }
 
@@ -529,7 +547,8 @@ impl App {
             Screen::Prelude => match code {
                 K::Up => self.prelude_idx = self.prelude_idx.saturating_sub(1),
                 K::Down => {
-                    self.prelude_idx = (self.prelude_idx + 1).min(self.found.len().saturating_sub(1))
+                    self.prelude_idx =
+                        (self.prelude_idx + 1).min(self.found.len().saturating_sub(1))
                 }
                 K::Char(' ') | K::Left | K::Right => {
                     if let Some(f) = self.found.get_mut(self.prelude_idx) {
@@ -572,13 +591,12 @@ impl App {
                         self.collect_report();
                     }
                 }
-                K::Esc | K::Enter => {
+                K::Esc | K::Enter
                     // Keep the screen while the probe is running: leaving now
                     // would silently drop its result.
-                    if self.check_rx.is_none() {
+                    if self.check_rx.is_none() => {
                         self.screen = Screen::Home;
                     }
-                }
                 _ => {}
             },
             Screen::Advanced => match code {
@@ -689,14 +707,13 @@ impl App {
         let path = self.cfg.data_dir().join("proxy-nodes.json");
         let (mut store, _) = NodeStore::load(&path);
         if store.nodes.is_empty() {
-            let links: Vec<String> = std::fs::read_to_string(
-                self.cfg.data_dir().join("subs_alive_plain.txt"),
-            )
-            .unwrap_or_default()
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-            .map(str::to_string)
-            .collect();
+            let links: Vec<String> =
+                std::fs::read_to_string(self.cfg.data_dir().join("subs_alive_plain.txt"))
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+                    .map(str::to_string)
+                    .collect();
             if !links.is_empty() {
                 let stats = store.import(&links, "subs_alive_plain.txt", crate::state::now_secs());
                 self.proxy_msg = Some(format!(
@@ -725,7 +742,11 @@ impl App {
 
     fn proxy_ids(&self) -> Vec<String> {
         self.proxies
-            .ranked(self.proxy_rank, &Filter::default(), crate::state::now_secs())
+            .ranked(
+                self.proxy_rank,
+                &Filter::default(),
+                crate::state::now_secs(),
+            )
             .iter()
             .map(|n| n.id.clone())
             .collect()
@@ -769,7 +790,7 @@ impl App {
                 let name = self
                     .proxies
                     .get(&id)
-                    .map(|n| node_title(n))
+                    .map(node_title)
                     .unwrap_or_else(|| id.clone());
                 self.proxy_msg = Some(format!(
                     "{}: {name}",
@@ -863,12 +884,14 @@ impl App {
                 if let Some(p) = self.profiles.profiles.get(self.profile_idx).cloned() {
                     let dir = self.cfg.data_dir().join("profiles");
                     if self.mode.is_demo() {
-                        self.status_msg = Some(tr(
-                            &self.cfg.lang,
-                            "Демо: экспорт не выполняется",
-                            "Demo: export is skipped",
-                        )
-                        .to_string());
+                        self.status_msg = Some(
+                            tr(
+                                &self.cfg.lang,
+                                "Демо: экспорт не выполняется",
+                                "Demo: export is skipped",
+                            )
+                            .to_string(),
+                        );
                     } else {
                         match self.profiles.export(&p, &dir) {
                             Ok(path) => {
@@ -892,7 +915,14 @@ impl App {
                 let path = self.cfg.data_dir().join("profiles").join("import.json");
                 let lang = self.cfg.lang.clone();
                 if self.mode.is_demo() {
-                    self.status_msg = Some(tr(&lang, "Демо: импорт не выполняется", "Demo: import is skipped").to_string());
+                    self.status_msg = Some(
+                        tr(
+                            &lang,
+                            "Демо: импорт не выполняется",
+                            "Demo: import is skipped",
+                        )
+                        .to_string(),
+                    );
                 } else {
                     match std::fs::read_to_string(&path)
                         .map_err(anyhow::Error::from)
@@ -935,9 +965,7 @@ impl App {
         };
         match code {
             K::Up => self.profile_edit_row = self.profile_edit_row.saturating_sub(1),
-            K::Down => {
-                self.profile_edit_row = (self.profile_edit_row + 1).min(PROFILE_ROWS - 1)
-            }
+            K::Down => self.profile_edit_row = (self.profile_edit_row + 1).min(PROFILE_ROWS - 1),
             K::Left | K::Right | K::Char(' ') => match self.profile_edit_row {
                 0 => p.bypass = !p.bypass,
                 1 => p.dns = !p.dns,
@@ -961,9 +989,11 @@ impl App {
                     self.profile_edit_row += 1;
                 } else {
                     let p = self.editing_profile.take().unwrap_or_default();
-                    match self.profiles.upsert(p.clone()).and_then(|_| {
-                        self.profiles.save(&self.cfg.data_dir())
-                    }) {
+                    match self
+                        .profiles
+                        .upsert(p.clone())
+                        .and_then(|_| self.profiles.save(&self.cfg.data_dir()))
+                    {
                         Ok(()) => {
                             self.status_msg = Some(format!(
                                 "{}: {}",
@@ -1106,7 +1136,9 @@ impl App {
 
     /// Projects raw check results into the core state and a staged diagnosis.
     fn apply_checks_to_core(&mut self) {
-        let dns = self.check_value("DNS").or_else(|| self.check_value("Интернет"));
+        let dns = self
+            .check_value("DNS")
+            .or_else(|| self.check_value("Интернет"));
         let youtube = self.check_value("YouTube");
         let discord = self.check_value("Discord");
         let telegram = self.check_value("Telegram");
@@ -1115,18 +1147,11 @@ impl App {
             (Some(a), Some(b)) => Some(a && b),
             _ => None,
         };
-        let tgws_running = self.mode.is_demo()
-            || detect::proc_running("TgWsProxy.exe");
+        let tgws_running = self.mode.is_demo() || detect::proc_running("TgWsProxy.exe");
         let subs_present = self.cfg.data_dir().join("subs_alive_plain.txt").exists();
         let ps = crate::modules::check::proxy_signals(&self.cfg.data_dir());
-        let proxy_tls = ps
-            .as_ref()
-            .filter(|p| p.checked > 0)
-            .map(|p| p.tls_ok > 0);
-        let proxy_tcp = ps
-            .as_ref()
-            .filter(|p| p.checked > 0)
-            .map(|p| p.tcp_ok > 0);
+        let proxy_tls = ps.as_ref().filter(|p| p.checked > 0).map(|p| p.tls_ok > 0);
+        let proxy_tcp = ps.as_ref().filter(|p| p.checked > 0).map(|p| p.tcp_ok > 0);
         let signals = Signals {
             dns_ok: dns,
             // A failed name lookup makes later TCP/TLS results meaningless.
@@ -1351,7 +1376,11 @@ impl App {
     fn steps_key(&mut self, code: crossterm::event::KeyCode, simple: bool) {
         use crossterm::event::KeyCode as K;
         if self.steps.is_empty() {
-            self.screen = if simple { Screen::Home } else { Screen::Components };
+            self.screen = if simple {
+                Screen::Home
+            } else {
+                Screen::Components
+            };
             return;
         }
         if simple {
@@ -1573,8 +1602,6 @@ impl App {
             autostart: self.cfg.autostart,
             service_mode: self.cfg.service_mode,
             hosts_block_ads: self.cfg.hosts_block_ads,
-            autoupdate_days: self.cfg.autoupdate_days,
-            reminders: self.cfg.reminders,
             telemetry: self.cfg.telemetry,
             repo: self.cfg.repo.clone(),
             keep_zapret,
@@ -1704,13 +1731,29 @@ impl App {
                     self.refresh_health();
                     let (ru, en) = if self.off_run {
                         (
-                            if ok { "Выключено, настройки возвращены" } else { "Выключено частично" },
-                            if ok { "Turned off, settings restored" } else { "Partially turned off" },
+                            if ok {
+                                "Выключено, настройки возвращены"
+                            } else {
+                                "Выключено частично"
+                            },
+                            if ok {
+                                "Turned off, settings restored"
+                            } else {
+                                "Partially turned off"
+                            },
                         )
                     } else {
                         (
-                            if ok { "Включено: настройка завершена" } else { "Настройка завершилась с ошибками" },
-                            if ok { "Turned on: setup finished" } else { "Setup finished with errors" },
+                            if ok {
+                                "Включено: настройка завершена"
+                            } else {
+                                "Настройка завершилась с ошибками"
+                            },
+                            if ok {
+                                "Turned on: setup finished"
+                            } else {
+                                "Setup finished with errors"
+                            },
                         )
                     };
                     self.record(if self.off_run { "off" } else { "setup" }, ru, en, ok);
@@ -1840,11 +1883,31 @@ fn toggle_component(c: &mut Components, i: usize) {
 
 pub fn comp_rows() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        ("zapret (обход DPI)", "zapret (DPI bypass)", "YouTube, Discord и другие сайты"),
-        ("Прокси для Telegram", "Telegram proxy", "автоподбор самого быстрого"),
-        ("Запасной мост TgWsProxy", "TgWsProxy fallback", "если прокси не сработал"),
-        ("hosts (реклама)", "hosts (ads)", "резервная копия + блок рекламы"),
-        ("Бесплатные серверы (VLESS)", "Free servers (VLESS)", "поиск живых узлов"),
+        (
+            "zapret (обход DPI)",
+            "zapret (DPI bypass)",
+            "YouTube, Discord и другие сайты",
+        ),
+        (
+            "Прокси для Telegram",
+            "Telegram proxy",
+            "автоподбор самого быстрого",
+        ),
+        (
+            "Запасной мост TgWsProxy",
+            "TgWsProxy fallback",
+            "если прокси не сработал",
+        ),
+        (
+            "hosts (реклама)",
+            "hosts (ads)",
+            "резервная копия + блок рекламы",
+        ),
+        (
+            "Бесплатные серверы (VLESS)",
+            "Free servers (VLESS)",
+            "поиск живых узлов",
+        ),
         ("DNS / DoH", "DNS / DoH", "чинит определение сайтов"),
     ]
 }
@@ -1991,10 +2054,6 @@ fn build_steps(cfg: &Config) -> Vec<Step> {
     v
 }
 
-pub fn build_steps_demo(cfg: &Config) -> Vec<Step> {
-    build_steps(cfg)
-}
-
 pub fn build_simple_demo(cfg: &Config) -> Vec<Step> {
     build_simple(cfg)
 }
@@ -2005,7 +2064,11 @@ pub fn simple_summary(steps: &[Step], lang: &str) -> Vec<String> {
     let client = find_choice(steps, "Install a servers app?").unwrap_or(0);
     let autostart = find_yes(steps, "Start automatically with Windows?").unwrap_or(true);
     let what = match mode {
-        1 => tr(lang, "обход YouTube и Discord", "YouTube and Discord bypass"),
+        1 => tr(
+            lang,
+            "обход YouTube и Discord",
+            "YouTube and Discord bypass",
+        ),
         2 => tr(lang, "прокси для Telegram", "Telegram proxy"),
         _ => tr(
             lang,
@@ -2013,7 +2076,10 @@ pub fn simple_summary(steps: &[Step], lang: &str) -> Vec<String> {
             "YouTube/Discord bypass and Telegram proxy",
         ),
     };
-    let mut v = vec![format!("{}: {what}", tr(lang, "Будет включено", "Will be turned on"))];
+    let mut v = vec![format!(
+        "{}: {what}",
+        tr(lang, "Будет включено", "Will be turned on")
+    )];
     if client != 0 {
         let app = match client {
             1 => "Hiddify",
@@ -2097,8 +2163,13 @@ pub(crate) fn build_status(cfg: &Config) -> Vec<String> {
                 total as f64 / 1e9
             )
         },
-        format!("Приложение для серверов: {}",
-            if cfg.client.is_empty() { "не выбрано" } else { cfg.client.as_str() }
+        format!(
+            "Приложение для серверов: {}",
+            if cfg.client.is_empty() {
+                "не выбрано"
+            } else {
+                cfg.client.as_str()
+            }
         ),
         format!("Файл лога: {}", cfg.data_dir().join("obhod.log").display()),
         format!("Папка приложений: {}", default_client_dir(cfg)),
@@ -2109,8 +2180,6 @@ pub(crate) fn build_status(cfg: &Config) -> Vec<String> {
         autostart: cfg.autostart,
         service_mode: cfg.service_mode,
         hosts_block_ads: cfg.hosts_block_ads,
-        autoupdate_days: cfg.autoupdate_days,
-        reminders: cfg.reminders,
         telemetry: cfg.telemetry,
         repo: cfg.repo.clone(),
         keep_zapret: false,

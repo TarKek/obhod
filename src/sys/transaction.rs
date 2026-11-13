@@ -15,9 +15,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use super::journal::{
-    Journal, Phase, Record, Status, Undo, ACTION_COMMIT, ACTION_ROLLBACK_DONE,
-};
+use super::journal::{Journal, Phase, Record, Status, Undo, ACTION_COMMIT, ACTION_ROLLBACK_DONE};
 
 /// Context handed to a step. Steps use it to journal extra detail and to learn
 /// their transaction id (useful in log lines).
@@ -65,7 +63,16 @@ impl<'a> TxHandle<'a> {
         before: Option<Value>,
         after: Option<Value>,
     ) -> Result<()> {
-        self.record(component, phase, action, Status::Ok, undo, before, after, None)
+        self.record(
+            component,
+            phase,
+            action,
+            Status::Ok,
+            undo,
+            before,
+            after,
+            None,
+        )
     }
 
     /// Extra detail inside a phase (e.g. one line per network interface).
@@ -158,13 +165,7 @@ pub fn run(component: &str, journal: &Journal, mut steps: Vec<Box<dyn Step>>) ->
     let mut res = TxResult::new(tx.clone());
     let mut applied: Vec<usize> = Vec::new();
 
-    let outcome = execute(
-        component,
-        journal,
-        &tx,
-        steps.as_mut_slice(),
-        &mut applied,
-    );
+    let outcome = execute(component, journal, &tx, steps.as_mut_slice(), &mut applied);
 
     if let Err(e) = outcome {
         res.error = Some(format!("{e:#}"));
@@ -290,7 +291,14 @@ fn execute(
         step.commit(&h)?;
         h.ok(&comp, Phase::Commit, act, Undo::None, None, None)?;
     }
-    h.ok(component, Phase::Commit, ACTION_COMMIT, Undo::None, None, None)?;
+    h.ok(
+        component,
+        Phase::Commit,
+        ACTION_COMMIT,
+        Undo::None,
+        None,
+        None,
+    )?;
     Ok(())
 }
 
@@ -498,7 +506,10 @@ mod tests {
             lines.iter().rev().take(2).cloned().collect::<Vec<_>>(),
             vec!["a:rollback".to_string(), "b:rollback".to_string()]
         );
-        assert!(j.pending().unwrap().is_empty(), "rollback completed -> no retry");
+        assert!(
+            j.pending().unwrap().is_empty(),
+            "rollback completed -> no retry"
+        );
     }
 
     #[test]
