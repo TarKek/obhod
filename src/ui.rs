@@ -400,9 +400,13 @@ fn draw_simple(f: &mut Frame, area: Rect, app: &App) {
 
     let mut items: Vec<ListItem> = Vec::new();
     let width = inner_width(area);
+    let mut current_row = 0usize;
     for (i, st) in app.steps.iter().enumerate() {
         let selected = i == current;
         let title = tr(lang, st.ru, st.en);
+        if selected {
+            current_row = items.len();
+        }
 
         items.push(menu_row(title, "", selected, width, 18));
 
@@ -464,7 +468,9 @@ fn draw_simple(f: &mut Frame, area: Rect, app: &App) {
         current + 1,
         total
     );
-    f.render_widget(List::new(items).block(block(&title)), area);
+    let mut state = ListState::default();
+    state.select(Some(current_row));
+    f.render_stateful_widget(List::new(items).block(block(&title)), area, &mut state);
 }
 
 /// One row of answer options: `● chosen   ○ other   ○ other`.
