@@ -64,14 +64,21 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
             "демо-режим: ничего не устанавливается и не меняется",
             "demo mode: nothing is installed or changed",
         )
+    } else if !crate::util::is_admin() {
+        tr(
+            &app.cfg.lang,
+            "ограниченный режим: нет прав администратора — часть действий не сработает",
+            "limited mode: not an administrator - some actions will be skipped",
+        )
     } else {
         brand::tagline(&app.cfg.lang)
     };
+    let no_admin = !app.mode.is_demo() && !crate::util::is_admin();
     f.render_widget(
         Paragraph::new(hint)
             .block(block)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(if app.mode.is_demo() {
+            .style(Style::default().fg(if app.mode.is_demo() || no_admin {
                 brand::warn()
             } else {
                 brand::text()
@@ -114,8 +121,16 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             "подождите, идёт настройка...  (L — подробности)",
             "please wait, working...  (L details)",
         ),
-        Screen::Result => tr(lang, "Enter — в меню", "Enter back to menu"),
-        Screen::Check => tr(lang, "Enter — в меню", "Enter back to menu"),
+        Screen::Result => tr(
+            lang,
+            "Enter — в меню · R — собрать отчёт",
+            "Enter back to menu · R collect report",
+        ),
+        Screen::Check => tr(
+            lang,
+            "Enter — в меню · R — собрать отчёт для тестера",
+            "Enter back to menu · R collect a report",
+        ),
         Screen::Advanced => tr(lang, "↑/↓, Enter — открыть, Esc — назад", "↑/↓, Enter open, Esc back"),
         Screen::Components => tr(
             lang,
@@ -531,11 +546,21 @@ fn draw_progress(f: &mut Frame, area: Rect, app: &App) {
 fn draw_result(f: &mut Frame, area: Rect, app: &App) {
     let lang = app.cfg.lang.as_str();
     if app.off_run {
-        let lines = vec![
+        let mut lines = vec![
             Line::from(""),
             Line::from(Span::styled(
-                tr(lang, "  Готово — выключено.", "  Done - it is off."),
-                Style::default().fg(brand::ok()).bold(),
+                if app.last_ok {
+                    tr(lang, "  Готово — выключено.", "  Done - it is off.")
+                } else {
+                    tr(
+                        lang,
+                        "  Выключено, но не всё удалось.",
+                        "  Turned off, but not everything succeeded.",
+                    )
+                },
+                Style::default()
+                    .fg(if app.last_ok { brand::ok() } else { brand::warn() })
+                    .bold(),
             )),
             Line::from(""),
             Line::from(tr(
@@ -549,11 +574,22 @@ fn draw_result(f: &mut Frame, area: Rect, app: &App) {
                 "  Program files stay in place: you can turn it on again.",
             )),
             Line::from(""),
-            Line::from(Span::styled(
-                tr(lang, "  Enter — в меню.", "  Enter to return to the menu."),
-                Style::default().fg(brand::muted()),
-            )),
         ];
+        if !app.last_ok {
+            lines.push(Line::from(Span::styled(
+                tr(
+                    lang,
+                    "  R — собрать отчёт для проверки.",
+                    "  R - collect a report for support.",
+                ),
+                Style::default().fg(brand::warn()),
+            )));
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(
+            tr(lang, "  Enter — в меню.", "  Enter to return to the menu."),
+            Style::default().fg(brand::muted()),
+        )));
         f.render_widget(
             Paragraph::new(lines)
                 .block(block(tr(lang, "Результат", "Result")))
@@ -563,69 +599,109 @@ fn draw_result(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let c = &app.cfg.components;
+    let has_warn = !app.last_ok;
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            tr(lang, "  Готово!", "  Done!"),
-            Style::default().fg(brand::ok()).bold(),
+            if has_warn {
+                tr(
+                    lang,
+                    "  Готово, но что-то не получилось.",
+                    "  Done, but something failed.",
+                )
+            } else {
+                tr(lang, "  Готово!", "  Done!")
+            },
+            Style::default()
+                .fg(if has_warn { brand::warn() } else { brand::ok() })
+                .bold(),
         )),
         Line::from(""),
     ];
-    if c.zapret {
-        lines.push(Line::from(tr(
-            lang,
-            "  ✓ YouTube и Discord должны открываться.",
-            "  ✓ YouTube and Discord should open.",
+    if app.last_ok {
+        if c.zapret {
+            lines.push(Line::from(tr(
+                lang,
+                "  ✓ YouTube и Discord должны открываться.",
+                "  ✓ YouTube and Discord should open.",
+            )));
+        }
+        if c.mtproto {
+            lines.push(Line::from(tr(
+                lang,
+                "  ✓ Telegram: откройте его — должно появиться окно «Включить прокси»,",
+                "  ✓ Telegram: open it - a proxy prompt should appear,",
+            )));
+            lines.push(Line::from(tr(
+                lang,
+                "    нажмите «Включить».",
+                "    press \"Enable\".",
+            )));
+        }
+        if c.tgws {
+            lines.push(Line::from(tr(
+                lang,
+                "  ✓ Запасной способ для Telegram подготовлен (если понадобится).",
+                "  ✓ A backup path for Telegram is ready (if needed).",
+            )));
+        }
+        let client = app.cfg.client.as_str();
+        if client != "none" && !client.is_empty() {
+            let name = match client {
+                "hiddify" => "Hiddify",
+                "v2rayn" => "v2rayN",
+                "happ" => "Happ",
+                _ => "приложение",
+            };
+            lines.push(Line::from(format!(
+                "  ✓ {name} установлен и запущен."
+            )));
+            lines.push(Line::from(tr(
+                lang,
+                "  Ссылка на подписку скопирована в буфер обмена.",
+                "  The subscription link is copied to the clipboard.",
+            )));
+            lines.push(Line::from(tr(
+                lang,
+                "  В приложении: «Добавить подписку» → вставить (Ctrl+V) → «Добавить».",
+                "  In the app: \"Add subscription\" -> paste (Ctrl+V) -> \"Add\".",
+            )));
+            lines.push(Line::from(format!(
+                "  {} «{}» {}",
+                tr(lang, "Серверы будут вида", "Servers look like"),
+                brand::sample(lang),
+                tr(lang, "— по 2 быстрых на страну.", "- 2 fastest per country.")
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            tr(lang, "  Что не удалось:", "  What failed:"),
+            Style::default().fg(brand::err()).bold(),
         )));
-    }
-    if c.mtproto {
-        lines.push(Line::from(tr(
-            lang,
-            "  ✓ Telegram: откройте его — должно появиться окно «Включить прокси»,",
-            "  ✓ Telegram: open it - a proxy prompt should appear,",
-        )));
-        lines.push(Line::from(tr(
-            lang,
-            "    нажмите «Включить».",
-            "    press \"Enable\".",
-        )));
-    }
-    if c.tgws {
-        lines.push(Line::from(tr(
-            lang,
-            "  ✓ Запасной способ для Telegram подготовлен (если понадобится).",
-            "  ✓ A backup path for Telegram is ready (if needed).",
-        )));
-    }
-    let client = app.cfg.client.as_str();
-    if client != "none" && !client.is_empty() {
-        let name = match client {
-            "hiddify" => "Hiddify",
-            "v2rayn" => "v2rayN",
-            "happ" => "Happ",
-            _ => "приложение",
-        };
-        lines.push(Line::from(format!(
-            "  ✓ {name} установлен и запущен."
-        )));
-        lines.push(Line::from(tr(
-            lang,
-            "  Ссылка на подписку скопирована в буфер обмена.",
-            "  The subscription link is copied to the clipboard.",
-        )));
-        lines.push(Line::from(tr(
-            lang,
-            "  В приложении: «Добавить подписку» → вставить (Ctrl+V) → «Добавить».",
-            "  In the app: \"Add subscription\" -> paste (Ctrl+V) -> \"Add\".",
-        )));
-        lines.push(Line::from(format!(
-            "  {} «{}» {}",
-            tr(lang, "Серверы будут вида", "Servers look like"),
-            brand::sample(lang),
-            tr(lang, "— по 2 быстрых на страну.", "- 2 fastest per country.")
-        )));
+        for line in app
+            .logs
+            .iter()
+            .filter(|l| l.contains('⚠'))
+            .take(3)
+        {
+            lines.push(Line::from(Span::styled(
+                format!("  • {}", line.trim_start_matches(['⚠', ' '])),
+                Style::default().fg(brand::secondary()),
+            )));
+        }
     }
     lines.push(Line::from(""));
+    if has_warn {
+        lines.push(Line::from(Span::styled(
+            tr(
+                lang,
+                "  Что-то не получилось. Нажмите R — соберём отчёт для проверки.",
+                "  Something failed. Press R to collect a report for support.",
+            ),
+            Style::default().fg(brand::warn()).bold(),
+        )));
+        lines.push(Line::from(""));
+    }
     lines.push(Line::from(Span::styled(
         tr(
             lang,
@@ -724,6 +800,14 @@ fn draw_check(f: &mut Frame, area: Rect, app: &App) {
                     "  If something is wrong - press \"Turn everything on\" to fix it.",
                 ),
                 Style::default().fg(brand::warn()),
+            )));
+            lines.push(Line::from(Span::styled(
+                tr(
+                    lang,
+                    "  R — собрать отчёт (файл откроется в проводнике).",
+                    "  R - collect a report (opens in Explorer).",
+                ),
+                Style::default().fg(brand::muted()),
             )));
             f.render_widget(
                 Paragraph::new(lines).block(block(tr(lang, "Проверка", "Check"))),
@@ -1033,7 +1117,7 @@ fn draw_settings(f: &mut Frame, area: Rect, app: &App) {
                 tr(lang, "Открыть папку данных", "Open data folder"),
                 tr(lang, "где лежат файлы", "where the files are").to_string(),
             ),
-            SetItem::Save => (tr(lang, "Сохранить и выйти", "Save and exit"), String::new()),
+            SetItem::Save => (tr(lang, "Готово — назад", "Done - back"), String::new()),
         })
         .collect();
     let col = menu_col(rows.iter().map(|(t, _)| *t));

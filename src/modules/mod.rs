@@ -56,7 +56,7 @@ impl Ctx {
     }
 }
 
-pub fn run_all(ctx: &Ctx) -> Result<()> {
+pub fn run_all(ctx: &Ctx) -> bool {
     let c = ctx.opts.components.clone();
     let mut steps: Vec<(&str, fn(&Ctx) -> Result<()>)> = Vec::new();
     if c.zapret {
@@ -83,15 +83,17 @@ pub fn run_all(ctx: &Ctx) -> Result<()> {
     steps.push(("отчёт", crate::modules::report::run));
 
     let n = steps.len().max(1);
+    let mut failed = 0usize;
     for (i, (name, f)) in steps.iter().enumerate() {
         ctx.progress(((i * 100) / n) as u8, *name);
         ctx.log(format!("── {name} ──"));
         if let Err(e) = f(ctx) {
+            failed += 1;
             ctx.log(format!("⚠ {name}: {e:#}"));
         }
     }
     ctx.progress(100, "готово");
-    Ok(())
+    failed == 0
 }
 
 pub fn prepare(cfg: &Config) -> Result<RunOptions> {

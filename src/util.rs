@@ -366,6 +366,15 @@ pub fn relaunch_elevated(extra: &[String]) -> Result<()> {
     anyhow::bail!("UAC отменён или недоступен (код {rc})")
 }
 
+pub fn reveal(path: &Path) -> Result<()> {
+    Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("не удалось открыть проводник")?;
+    Ok(())
+}
+
 pub fn reg_set_string(root: &str, path: &str, name: &str, value: &str) -> Result<()> {
     let out = hidden_str(
         "reg",

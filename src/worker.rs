@@ -194,7 +194,7 @@ pub fn spawn(opts: RunOptions) -> Receiver<Msg> {
             tx: tx.clone(),
             admin,
         };
-        let res = modules::run_all(&ctx);
+        let ok = modules::run_all(&ctx);
 
         // Autostart belongs to the bypass components (zapret service / TgWsProxy),
         // not to this setup wizard. Opening the TUI at every login would be annoying.
@@ -202,10 +202,6 @@ pub fn spawn(opts: RunOptions) -> Receiver<Msg> {
             ctx.log("Телеметрия: выключена.");
         }
 
-        let ok = res.is_ok();
-        if let Err(e) = res {
-            ctx.log(format!("Ошибка: {e:#}"));
-        }
         let _ = tx.send(Msg::Done(ok));
     });
     rx

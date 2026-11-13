@@ -11,6 +11,18 @@ pub struct CheckItem {
     pub detail_en: String,
 }
 
+impl Clone for CheckItem {
+    fn clone(&self) -> Self {
+        Self {
+            ru: self.ru.clone(),
+            en: self.en.clone(),
+            ok: self.ok,
+            detail_ru: self.detail_ru.clone(),
+            detail_en: self.detail_en.clone(),
+        }
+    }
+}
+
 pub fn run() -> Vec<CheckItem> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))

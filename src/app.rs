@@ -144,6 +144,8 @@ pub struct App {
     pub update_status: Option<(bool, worker::UpdateMode)>,
     pub check_rx: Option<Receiver<Vec<crate::modules::check::CheckItem>>>,
     pub check_items: Option<Vec<crate::modules::check::CheckItem>>,
+    /// Result of the last setup/off run: whether all steps succeeded.
+    pub last_ok: bool,
 }
 
 pub fn tr<'a>(lang: &str, ru: &'a str, en: &'a str) -> &'a str {
@@ -192,6 +194,7 @@ impl App {
             update_status: None,
             check_rx: None,
             check_items: None,
+            last_ok: true,
         };
         app.refresh_health();
         app
@@ -205,7 +208,8 @@ impl App {
 
     /// Reads the real system state (service + Telegram proxy list) once.
     pub fn refresh_health(&mut self) {
-        self.svc_on = crate::modules::zapret::service_running();
+        self.svc_on = crate::modules::zapret::service_running()
+            || crate::modules::detect::proc_running("winws.exe");
         self.tg_on = self.cfg.data_dir().join("mtproto.txt").exists();
     }
 
@@ -388,23 +392,35 @@ impl App {
                     self.show_logs = !self.show_logs;
                 }
             }
-            Screen::Result => {
-                if matches!(code, K::Enter | K::Esc | K::Char(' ')) {
+            Screen::Result => match code {
+                K::Char('r') | K::Char('R') => self.collect_report(),
+                K::Enter | K::Esc | K::Char(' ') => {
                     self.off_run = false;
                     self.refresh_health();
                     self.screen = Screen::Home;
                 }
-            }
+                _ => {}
+            },
             Screen::Off => match code {
                 K::Enter | K::Char(' ') => self.start_off(),
                 K::Esc => self.screen = Screen::Home,
                 _ => {}
             },
-            Screen::Check => {
-                if matches!(code, K::Esc | K::Enter) {
-                    self.screen = Screen::Home;
+            Screen::Check => match code {
+                K::Char('r') | K::Char('R') => {
+                    if self.check_rx.is_none() {
+                        self.collect_report();
+                    }
                 }
-            }
+                K::Esc | K::Enter => {
+                    // Keep the screen while the probe is running: leaving now
+                    // would silently drop its result.
+                    if self.check_rx.is_none() {
+                        self.screen = Screen::Home;
+                    }
+                }
+                _ => {}
+            },
             Screen::Advanced => match code {
                 K::Up => self.adv_idx = self.adv_idx.saturating_sub(1),
                 K::Down => self.adv_idx = (self.adv_idx + 1).min(self.adv_items().len() - 1),
@@ -474,6 +490,26 @@ impl App {
         } else {
             self.prelude_idx = 0;
             self.screen = Screen::Prelude;
+        }
+    }
+
+    fn collect_report(&mut self) {
+        self.refresh_health();
+        let checks = self.check_items.clone().unwrap_or_default();
+        match crate::modules::report::write_diagnostics(
+            &self.cfg,
+            self.mode.name(),
+            &checks,
+            self.svc_on,
+            self.tg_on,
+        ) {
+            Ok(path) => {
+                crate::logger::info(format!("отчёт: {}", path.display()));
+                if !self.mode.is_demo() {
+                    let _ = crate::util::reveal(&path);
+                }
+            }
+            Err(e) => crate::logger::info(format!("отчёт не создан: {e:#}")),
         }
     }
 
@@ -734,6 +770,8 @@ impl App {
         self.cfg.reminders = false;
         self.cfg.hosts_block_ads = false;
         self.cfg.autoupdate_days = if full_probe { 7 } else { 0 };
+        // Setup just fetched fresh lists; do not nag about updates right away.
+        self.cfg.last_update_check = crate::state::now_secs();
         if self.cfg.data_dir.is_empty() {
             self.cfg.data_dir = util::exe_dir().join("data").display().to_string();
         }
@@ -924,6 +962,7 @@ impl App {
                     }
                 }
                 None => {
+                    self.last_ok = ok;
                     self.refresh_health();
                     self.screen = Screen::Result;
                 }
@@ -1077,7 +1116,7 @@ fn build_simple(cfg: &Config) -> Vec<Step> {
             ),
         },
         Step {
-            ru: "Приложение для серверов?",
+            ru: "Установить приложение для серверов?",
             en: "Install a servers app?",
             kind: StepKind::Choice(
                 client_index(cfg),
@@ -1099,7 +1138,7 @@ fn build_simple(cfg: &Config) -> Vec<Step> {
         kind: StepKind::YesNo(cfg.autostart),
     });
     v.push(Step {
-        ru: "Подобрать лучший прокси?",
+        ru: "Настроить прокси для Telegram?",
         en: "Pick the best proxy for me?",
         kind: StepKind::YesNo(true),
     });

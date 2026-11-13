@@ -101,7 +101,7 @@ fn main() {
         }
     }
 
-    if !args.iter().any(|a| a == "--no-update") {
+    if !mode.is_demo() && !args.iter().any(|a| a == "--no-update") {
         match selfupdate::check_and_apply(&args) {
             Ok(true) => return,
             Ok(false) => {}

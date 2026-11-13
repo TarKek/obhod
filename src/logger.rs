@@ -56,6 +56,24 @@ pub fn info(msg: impl AsRef<str>) {
     }
 }
 
+pub fn stamp() -> String {
+    let mut st = SystemTime {
+        year: 0,
+        month: 0,
+        day_of_week: 0,
+        day: 0,
+        hour: 0,
+        minute: 0,
+        second: 0,
+        milliseconds: 0,
+    };
+    unsafe { GetLocalTime(&mut st) };
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        st.year, st.month, st.day, st.hour, st.minute, st.second
+    )
+}
+
 fn timestamp() -> String {
     let mut st = SystemTime {
         year: 0,
