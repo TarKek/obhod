@@ -274,6 +274,33 @@ pub(crate) mod testing {
             Ok(())
         }
     }
+
+    /// Lets a test keep a handle to the same in-memory filesystem it hands out.
+    impl FsIo for std::sync::Arc<MemFs> {
+        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            (**self).read(path)
+        }
+
+        fn write_atomic(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+            (**self).write_atomic(path, data)
+        }
+
+        fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+            (**self).copy(from, to)
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            (**self).exists(path)
+        }
+
+        fn remove(&self, path: &Path) -> io::Result<()> {
+            (**self).remove(path)
+        }
+
+        fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+            (**self).create_dir_all(path)
+        }
+    }
 }
 
 #[cfg(test)]

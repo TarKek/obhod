@@ -12,6 +12,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::modules::telegram;
+use crate::net::proxy;
 use crate::util;
 
 pub struct CheckItem {
@@ -229,31 +230,9 @@ pub fn demo() -> Vec<CheckItem> {
 /// Probes the best few proxies from `mtproto.txt` (TCP only). Returns `None`
 /// when the list does not exist yet: an empty row would be noise.
 fn mtproto_item(data: &Path) -> Option<CheckItem> {
-    let text = std::fs::read_to_string(data.join("mtproto.txt")).ok()?;
-    let proxies: Vec<telegram::MtProxy> = text
-        .lines()
-        .filter_map(|l| {
-            let i = l.find("tg://proxy")?;
-            telegram::parse_link(&l[i..])
-        })
-        .take(3)
-        .collect();
-    if proxies.is_empty() {
-        return None;
-    }
-    let total = proxies.len();
-    let cfg = telegram::default_probe_config();
-    let handles: Vec<_> = proxies
-        .into_iter()
-        .map(|p| {
-            let cfg = cfg.clone();
-            std::thread::spawn(move || telegram::probe(&p.server, p.port, &p.secret, &cfg).tcp_ok)
-        })
-        .collect();
-    let open = handles
-        .into_iter()
-        .filter(|h| h.join().unwrap_or(false))
-        .count();
+    let signals = proxy_signals(data)?;
+    let total = signals.checked;
+    let open = signals.tcp_ok;
     let ok = open > 0;
     Some(CheckItem {
         ru: "Прокси Telegram".into(),
@@ -269,6 +248,55 @@ fn mtproto_item(data: &Path) -> Option<CheckItem> {
         } else {
             "no TCP response - refresh the list via Update".into()
         },
+    })
+}
+
+/// Aggregate proxy signals for `core::health::Signals`.
+///
+/// `protocol_verified` is always `false`: the MTProto/VLESS handshakes are not
+/// implemented. `tls_ok` counts nodes whose TLS layer answered (currently 0 for
+/// MTProto because it speaks plain TCP; subscription TLS counts are stored in
+/// `subs_state.json`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProxySignals {
+    pub checked: usize,
+    pub tcp_ok: usize,
+    pub tls_ok: usize,
+    pub protocol_verified: bool,
+}
+
+/// Probes up to three best proxies from `mtproto.txt`. No file → `None`.
+pub fn proxy_signals(data: &Path) -> Option<ProxySignals> {
+    let text = std::fs::read_to_string(data.join("mtproto.txt")).ok()?;
+    let proxies: Vec<telegram::MtProxy> = text
+        .lines()
+        .filter_map(|l| {
+            let i = l.find("tg://proxy")?;
+            telegram::parse_link(&l[i..])
+        })
+        .take(3)
+        .collect();
+    if proxies.is_empty() {
+        return None;
+    }
+    let checked = proxies.len();
+    let cfg = telegram::default_probe_config();
+    let handles: Vec<_> = proxies
+        .into_iter()
+        .map(|p| {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || telegram::probe(&p.server, p.port, &p.secret, &cfg))
+        })
+        .collect();
+    let results: Vec<proxy::ProbeResult> = handles
+        .into_iter()
+        .filter_map(|h| h.join().ok())
+        .collect();
+    Some(ProxySignals {
+        checked,
+        tcp_ok: results.iter().filter(|r| r.tcp_ok).count(),
+        tls_ok: results.iter().filter(|r| r.tls_verified).count(),
+        protocol_verified: false,
     })
 }
 

@@ -8,6 +8,7 @@ use crate::core::history::{History, HistoryEntry};
 use crate::core::profiles::{self, Change, Current, Profile, ProfileStore};
 use crate::core::state::{Component, CoreState, Phase};
 use crate::modules::{detect, RunOptions};
+use crate::net::manager::{self, FailoverPolicy, Filter, Node, NodeStore, Ranking, Role};
 use crate::util;
 use crate::worker::{self, Msg};
 
@@ -69,6 +70,7 @@ pub enum HomeItem {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AdvItem {
     Health,
+    Proxies,
     Components,
     History,
     Diagnostics,
@@ -104,6 +106,7 @@ pub enum Screen {
     Update,
     Off,
     Profiles,
+    Proxies,
     ProfilePlan,
     ProfileEdit,
     History,
@@ -172,6 +175,24 @@ pub struct App {
     pub status_msg: Option<String>,
     /// Heartbeat from the background monitor (health refresh, update nudge).
     pub bg_rx: Option<Receiver<Tick>>,
+    /// Nodes collected from subscriptions; shown in the proxy manager.
+    pub proxies: NodeStore,
+    pub proxy_idx: usize,
+    pub proxy_rank: Ranking,
+    pub proxy_msg: Option<String>,
+}
+
+pub fn node_title(n: &Node) -> String {
+    let where_ = if n.country.is_empty() {
+        n.country_code.clone()
+    } else {
+        n.country.clone()
+    };
+    let ms = n
+        .latency_ms
+        .map(|v| format!("{v} мс"))
+        .unwrap_or_else(|| "—".into());
+    format!("{} · {} · {ms}", n.protocol.as_str(), where_)
 }
 
 pub fn tr<'a>(lang: &str, ru: &'a str, en: &'a str) -> &'a str {
@@ -234,6 +255,10 @@ impl App {
             history: History::default(),
             status_msg: None,
             bg_rx: None,
+            proxies: NodeStore::default(),
+            proxy_idx: 0,
+            proxy_rank: Ranking::Balanced,
+            proxy_msg: None,
         };
         if let Ok(()) = app.cfg.ensure_dirs() {
             app.profiles = ProfileStore::load(&data_dir);
@@ -257,6 +282,7 @@ impl App {
             app.bg_rx = Some(rx);
         }
         app.refresh_health();
+        app.proxies = NodeStore::load(&data_dir.join("proxy-nodes.json")).0;
         app
     }
 
@@ -398,6 +424,7 @@ impl App {
     pub fn adv_items(&self) -> Vec<AdvItem> {
         let mut v = vec![
             AdvItem::Health,
+            AdvItem::Proxies,
             AdvItem::Components,
             AdvItem::History,
             AdvItem::Diagnostics,
@@ -456,6 +483,7 @@ impl App {
             Screen::Update => "Update",
             Screen::Off => "Off",
             Screen::Profiles => "Profiles",
+            Screen::Proxies => "Proxies",
             Screen::ProfilePlan => "ProfilePlan",
             Screen::ProfileEdit => "ProfileEdit",
             Screen::History => "History",
@@ -560,6 +588,11 @@ impl App {
                     Some(AdvItem::Health) => {
                         self.start_check();
                     }
+                    Some(AdvItem::Proxies) => {
+                        self.load_proxies();
+                        self.proxy_idx = 0;
+                        self.screen = Screen::Proxies;
+                    }
                     Some(AdvItem::Components) => {
                         self.comp_cursor = 0;
                         self.screen = Screen::Components;
@@ -600,6 +633,7 @@ impl App {
             },
             Screen::Wizard => self.steps_key(code, false),
             Screen::Profiles => self.profiles_key(code),
+            Screen::Proxies => self.proxies_key(code),
             Screen::ProfilePlan => match code {
                 K::Enter | K::Char(' ') => self.apply_profile(),
                 K::Esc => {
@@ -648,6 +682,129 @@ impl App {
         } else {
             self.prelude_idx = 0;
             self.screen = Screen::Prelude;
+        }
+    }
+
+    fn load_proxies(&mut self) {
+        let path = self.cfg.data_dir().join("proxy-nodes.json");
+        let (mut store, _) = NodeStore::load(&path);
+        if store.nodes.is_empty() {
+            let links: Vec<String> = std::fs::read_to_string(
+                self.cfg.data_dir().join("subs_alive_plain.txt"),
+            )
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect();
+            if !links.is_empty() {
+                let stats = store.import(&links, "subs_alive_plain.txt", crate::state::now_secs());
+                self.proxy_msg = Some(format!(
+                    "{}: {} / {}",
+                    tr(&self.cfg.lang, "Загружено узлов", "Nodes imported"),
+                    stats.imported,
+                    stats.seen
+                ));
+                if !self.mode.is_demo() {
+                    let _ = store.save(&path);
+                }
+            }
+        }
+        self.proxies = store;
+    }
+
+    fn save_proxies(&mut self) {
+        if self.mode.is_demo() {
+            return;
+        }
+        let path = self.cfg.data_dir().join("proxy-nodes.json");
+        if let Err(e) = self.proxies.save(&path) {
+            crate::logger::info(format!("proxies: не сохранено: {e:#}"));
+        }
+    }
+
+    fn proxy_ids(&self) -> Vec<String> {
+        self.proxies
+            .ranked(self.proxy_rank, &Filter::default(), crate::state::now_secs())
+            .iter()
+            .map(|n| n.id.clone())
+            .collect()
+    }
+
+    fn proxies_key(&mut self, code: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode as K;
+        let ids = self.proxy_ids();
+        let Some(id) = ids.get(self.proxy_idx).cloned() else {
+            if code == K::Esc {
+                self.screen = Screen::Advanced;
+            }
+            return;
+        };
+        match code {
+            K::Up => self.proxy_idx = self.proxy_idx.saturating_sub(1),
+            K::Down => self.proxy_idx = (self.proxy_idx + 1).min(ids.len().saturating_sub(1)),
+            K::Char('f') | K::Char('F') => {
+                let fav = self.proxies.get(&id).map(|n| n.favorite).unwrap_or(false);
+                self.proxies.set_favorite(&id, !fav);
+                self.save_proxies();
+            }
+            K::Char('b') | K::Char('B') => {
+                self.proxies.set_role(&id, Role::Backup);
+                self.save_proxies();
+            }
+            K::Char('r') | K::Char('R') => {
+                self.proxy_rank = match self.proxy_rank {
+                    Ranking::Balanced => Ranking::BestLatency,
+                    Ranking::BestLatency => Ranking::MostStable,
+                    Ranking::MostStable => Ranking::Balanced,
+                };
+                self.proxy_msg = Some(self.proxy_rank.ru().to_string());
+                self.proxy_idx = 0;
+            }
+            K::Enter | K::Char(' ') | K::Char('p') | K::Char('P') => {
+                self.proxies.set_role(&id, Role::Primary);
+                self.proxies.previous = self.proxies.active.clone();
+                self.proxies.active = Some(id.clone());
+                self.proxies.active_since = crate::state::now_secs();
+                let name = self
+                    .proxies
+                    .get(&id)
+                    .map(|n| node_title(n))
+                    .unwrap_or_else(|| id.clone());
+                self.proxy_msg = Some(format!(
+                    "{}: {name}",
+                    tr(&self.cfg.lang, "Основной сервер", "Primary server")
+                ));
+                self.record(
+                    "proxy",
+                    format!("Основной сервер: {name}"),
+                    format!("Primary server: {name}"),
+                    true,
+                );
+                self.save_proxies();
+            }
+            K::Char('o') | K::Char('O') => {
+                let decision = manager::decide(
+                    &self.proxies,
+                    &FailoverPolicy::default(),
+                    &Filter::default(),
+                    crate::state::now_secs(),
+                );
+                self.proxy_msg = Some(decision.reason().to_string());
+                if decision.switched() {
+                    self.proxies
+                        .apply_decision(&decision, crate::state::now_secs());
+                    self.record(
+                        "proxy",
+                        format!("Переключение: {}", decision.reason()),
+                        format!("Switched: {}", decision.reason()),
+                        true,
+                    );
+                    self.save_proxies();
+                }
+            }
+            K::Esc => self.screen = Screen::Advanced,
+            _ => {}
         }
     }
 
@@ -961,13 +1118,26 @@ impl App {
         let tgws_running = self.mode.is_demo()
             || detect::proc_running("TgWsProxy.exe");
         let subs_present = self.cfg.data_dir().join("subs_alive_plain.txt").exists();
+        let ps = crate::modules::check::proxy_signals(&self.cfg.data_dir());
+        let proxy_tls = ps
+            .as_ref()
+            .filter(|p| p.checked > 0)
+            .map(|p| p.tls_ok > 0);
+        let proxy_tcp = ps
+            .as_ref()
+            .filter(|p| p.checked > 0)
+            .map(|p| p.tcp_ok > 0);
         let signals = Signals {
             dns_ok: dns,
             // A failed name lookup makes later TCP/TLS results meaningless.
-            tcp_ok: if dns == Some(false) { None } else { target },
-            // The current probes do not perform a separate TLS handshake.
-            tls_ok: None,
-            // And they do not speak the proxy protocol, so never claim it.
+            tcp_ok: if dns == Some(false) {
+                None
+            } else {
+                proxy_tcp.or(target)
+            },
+            // TLS is checked only for proxies where it is applicable.
+            tls_ok: proxy_tls,
+            // The probes never speak the proxy protocol, so never claim it.
             protocol_ok: None,
             proxy_configured: self.cfg.components.mtproto || self.cfg.components.tgws,
             proxy_running: self.tg_on,

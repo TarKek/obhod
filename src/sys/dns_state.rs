@@ -51,6 +51,23 @@ pub struct DohEntry {
     pub autoupgrade: bool,
 }
 
+/// Whether this Windows build exposes DoH at all, plus its templates.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct DohState {
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub entries: Vec<DohEntry>,
+}
+
+/// Public resolvers used for the bypass. Kept here so apply and restore always
+/// agree on what "ours" means.
+pub const PUBLIC_V4: [&str; 2] = ["1.1.1.1", "8.8.8.8"];
+pub const PUBLIC_DOH: [(&str, &str); 2] = [
+    ("1.1.1.1", "https://cloudflare-dns.com/dns-query"),
+    ("8.8.8.8", "https://dns.google/dns-query"),
+];
+
 /// DNS configuration of one adapter, as read before the change.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct IfaceDns {
@@ -63,6 +80,9 @@ pub struct IfaceDns {
     /// Adapter is up.
     #[serde(default)]
     pub connected: bool,
+    /// Virtual adapter (VPN/TUN/tunnel) rather than a physical NIC.
+    #[serde(default)]
+    pub virtual_adapter: bool,
     /// Has an IPv4 default gateway (the "active" interface).
     #[serde(default)]
     pub gateway: bool,
@@ -113,7 +133,7 @@ pub struct DnsSnapshot {
     #[serde(default)]
     pub interfaces: Vec<IfaceDns>,
     #[serde(default)]
-    pub doh: Vec<DohEntry>,
+    pub doh: DohState,
     /// Why DoH could not be read (old Windows), if so.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doh_error: Option<String>,
@@ -127,13 +147,26 @@ impl DnsSnapshot {
             complete: false,
             tx: tx.to_string(),
             interfaces: Vec::new(),
-            doh: Vec::new(),
+            doh: DohState::default(),
             doh_error: None,
         }
     }
 
-    /// Adapters we consider "in use": up and with a default gateway, else up.
+    /// Adapters we consider "in use": physical ones with a default gateway first,
+/// then any gateway adapter, then anything that is up.
+    ///
+    /// Virtual adapters (VPN/TUN) come last on purpose: changing DNS on a tunnel
+    /// can break the VPN, and the physical link is what actually resolves names
+    /// for the rest of the system.
     pub fn active(&self) -> Vec<&IfaceDns> {
+        let physical: Vec<&IfaceDns> = self
+            .interfaces
+            .iter()
+            .filter(|i| i.connected && i.gateway && !i.virtual_adapter)
+            .collect();
+        if !physical.is_empty() {
+            return physical;
+        }
         let gated: Vec<&IfaceDns> = self
             .interfaces
             .iter()
@@ -156,9 +189,9 @@ impl DnsSnapshot {
 pub trait DnsBackend {
     /// All adapters with their current DNS state.
     fn read_all(&self) -> Result<Vec<IfaceDns>>;
-    /// DoH templates. Empty on Windows builds without the cmdlet.
-    fn read_doh(&self) -> Result<Vec<DohEntry>> {
-        Ok(Vec::new())
+    /// DoH templates and whether this build supports them.
+    fn read_doh(&self) -> Result<DohState> {
+        Ok(DohState::default())
     }
     fn set_servers(&self, iface: &IfaceDns, family: Family, servers: &[String]) -> Result<()>;
     /// Both families back to DHCP-provided servers.
@@ -178,9 +211,17 @@ pub trait DnsBackend {
 
 /// Read the current state and persist a complete snapshot atomically.
 ///
+/// If a complete snapshot already exists it is kept and returned: it describes
+/// the state *before* the first change, which is what "turn it off and give it
+/// back as it was" must restore. Re-running "enable" therefore never overwrites
+/// the original with our own public-DNS state.
+///
 /// Step 1 writes an `complete: false` placeholder, so a crash during capture is
 /// visible later instead of being mistaken for a usable snapshot.
 pub fn capture_and_save(dir: &Path, be: &dyn DnsBackend, tx: &str) -> Result<DnsSnapshot> {
+    if let Ok(SnapshotState::Complete(existing)) = read_state(dir) {
+        return Ok(*existing);
+    }
     let path = snapshot_path(dir);
     let placeholder = DnsSnapshot::empty(tx);
     write_snapshot(&path, &placeholder).context("не удалось записать заготовку снимка DNS")?;
@@ -188,7 +229,7 @@ pub fn capture_and_save(dir: &Path, be: &dyn DnsBackend, tx: &str) -> Result<Dns
     let mut snap = DnsSnapshot::empty(tx);
     snap.interfaces = be.read_all().context("не удалось прочитать настройки DNS")?;
     match be.read_doh() {
-        Ok(list) => snap.doh = list,
+        Ok(state) => snap.doh = state,
         Err(e) => snap.doh_error = Some(format!("{e:#}")),
     }
     snap.complete = true;
@@ -235,7 +276,7 @@ pub fn read_state(dir: &Path) -> Result<SnapshotState> {
 pub fn remove_snapshot(dir: &Path) -> Result<bool> {
     let p = snapshot_path(dir);
     if p.exists() {
-        fsx::RealFs.remove(&p)?;
+        fsx::RealFs::remove(&p)?;
         Ok(true)
     } else {
         Ok(false)
@@ -331,54 +372,70 @@ pub fn restore(be: &dyn DnsBackend, snap: &DnsSnapshot) -> Vec<ActionOutcome> {
     };
 
     for saved in &snap.interfaces {
-        let live = current
+        if let Some(live) = current
             .iter()
             .find(|i| i.guid.eq_ignore_ascii_case(&saved.guid))
-            .or_else(|| current.iter().find(|i| i.alias == saved.alias));
-        let Some(live) = live else {
+            .or_else(|| current.iter().find(|i| i.alias == saved.alias))
+        {
+            // Skip adapters we never changed: touching an untouched interface
+            // (especially a VPN one) would add risk for nothing.
+            let mut needs_work = false;
+            for family in [Family::V4, Family::V6] {
+                if saved.dhcp(family) != live.dhcp(family) {
+                    needs_work = true;
+                } else if !saved.dhcp(family)
+                    && !same_servers(live.servers(family), saved.servers(family))
+                {
+                    needs_work = true;
+                }
+            }
+            if !needs_work {
+                out.push(ActionOutcome::ok(live.label(), "skip", "без изменений"));
+                continue;
+            }
+
+            // 1. Back to DHCP first, then 2. re-apply the static families.
+            //    `Set-DnsClientServerAddress -ResetServerAddresses` covers both
+            //    families, and a later static list only touches its own family.
+            match be.reset_all(live) {
+                Ok(()) => out.push(ActionOutcome::ok(
+                    live.label(),
+                    "reset",
+                    "получение адресов серверов автоматически",
+                )),
+                Err(e) => out.push(ActionOutcome::fail(live.label(), "reset", format!("{e:#}"))),
+            }
+            for family in [Family::V4, Family::V6] {
+                let list = saved.servers(family);
+                // Static-with-no-servers is not representable; treat as automatic.
+                if saved.dhcp(family) || list.is_empty() {
+                    continue;
+                }
+                match be.set_servers(live, family, list) {
+                    Ok(()) => out.push(ActionOutcome::ok(
+                        live.label(),
+                        format!("static-{}", family.as_str().to_ascii_lowercase()),
+                        list.join(", "),
+                    )),
+                    Err(e) => out.push(ActionOutcome::fail(
+                        live.label(),
+                        format!("static-{}", family.as_str().to_ascii_lowercase()),
+                        format!("{e:#}"),
+                    )),
+                }
+            }
+        } else {
             out.push(ActionOutcome::fail(
                 saved.label(),
                 "skip",
                 "интерфейс больше не существует",
             ));
-            continue;
-        };
-
-        // 1. Back to DHCP first, then 2. re-apply the static families.
-        //    `Set-DnsClientServerAddress -ResetServerAddresses` covers both
-        //    families, and a later static list only touches its own family.
-        match be.reset_all(live) {
-            Ok(()) => out.push(ActionOutcome::ok(
-                live.label(),
-                "reset",
-                "получение адресов серверов автоматически",
-            )),
-            Err(e) => out.push(ActionOutcome::fail(live.label(), "reset", format!("{e:#}"))),
-        }
-        for family in [Family::V4, Family::V6] {
-            let list = saved.servers(family);
-            // Static-with-no-servers is not representable; treat as automatic.
-            if saved.dhcp(family) || list.is_empty() {
-                continue;
-            }
-            match be.set_servers(live, family, list) {
-                Ok(()) => out.push(ActionOutcome::ok(
-                    live.label(),
-                    format!("static-{}", family.as_str().to_ascii_lowercase()),
-                    list.join(", "),
-                )),
-                Err(e) => out.push(ActionOutcome::fail(
-                    live.label(),
-                    format!("static-{}", family.as_str().to_ascii_lowercase()),
-                    format!("{e:#}"),
-                )),
-            }
         }
     }
     out
 }
 
-/// Restore from a snapshot file (used by crash recovery).
+/// Restore from a snapshot file (used by crash recovery and `off`).
 pub fn restore_from_file(path: &Path, be: &dyn DnsBackend) -> Result<()> {
     let snap = read_snapshot_file(path)?
         .ok_or_else(|| anyhow::anyhow!("снимок DNS {} не найден", path.display()))?;
@@ -386,17 +443,62 @@ pub fn restore_from_file(path: &Path, be: &dyn DnsBackend) -> Result<()> {
         // Nothing was applied from an incomplete snapshot.
         return Ok(());
     }
-    let outcomes = restore(be, &snap);
-    let failed: Vec<String> = outcomes
+    let mut failed: Vec<String> = restore(be, &snap)
         .iter()
         .filter(|o| !o.ok)
         .map(|o| format!("{} {}: {}", o.alias, o.what, o.detail))
         .collect();
+    if snap.doh.supported {
+        let ours: Vec<String> = PUBLIC_V4.iter().map(|s| s.to_string()).collect();
+        failed.extend(
+            restore_doh(be, &snap.doh.entries, &ours)
+                .iter()
+                .filter(|o| !o.ok)
+                .map(|o| format!("DoH {}: {}", o.alias, o.detail)),
+        );
+    }
     if failed.is_empty() {
         Ok(())
     } else {
         anyhow::bail!("DNS восстановлен не полностью: {}", failed.join("; "))
     }
+}
+
+/// Compare the live state with the snapshot. Returns human-readable problems.
+///
+/// DHCP interfaces are checked by their DHCP flag (the servers themselves come
+/// from the network and cannot be predicted); static ones by their exact list.
+pub fn verify_restored(be: &dyn DnsBackend, snap: &DnsSnapshot) -> Result<Vec<String>> {
+    let current = be.read_all()?;
+    let mut problems = Vec::new();
+    for saved in &snap.interfaces {
+        let Some(live) = current
+            .iter()
+            .find(|i| i.guid.eq_ignore_ascii_case(&saved.guid))
+        else {
+            continue; // adapter removed by the user: nothing to verify
+        };
+        for family in [Family::V4, Family::V6] {
+            if saved.dhcp(family) {
+                if !live.dhcp(family) {
+                    problems.push(format!(
+                        "{}: {} не вернулся на автоматический режим",
+                        saved.label(),
+                        family.as_str()
+                    ));
+                }
+            } else if !same_servers(live.servers(family), saved.servers(family)) {
+                problems.push(format!(
+                    "{}: {} сейчас {}, ожидались {}",
+                    saved.label(),
+                    family.as_str(),
+                    live.servers(family).join(", "),
+                    saved.servers(family).join(", ")
+                ));
+            }
+        }
+    }
+    Ok(problems)
 }
 
 /// Restore the DoH templates that the change touched.
@@ -450,6 +552,7 @@ foreach ($a in @(Get-NetAdapter -ErrorAction Stop)) {
     alias = [string]$a.Name
     index = $idx
     connected = ($a.Status -eq 'Up')
+    virtual_adapter = [bool]$a.Virtual
     gateway = [bool]$gw
     dhcp_v4 = [bool]$dhcp4
     dhcp_v6 = [bool]$dhcp6
@@ -461,13 +564,15 @@ ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
 "#;
 
 const PS_READ_DOH: &str = r#"
+$supported = $false
 $list = @()
 if (Get-Command Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue) {
+  $supported = $true
   $list = @(Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue | ForEach-Object {
     [pscustomobject]@{ server = [string]$_.ServerAddress; template = [string]$_.DohTemplate; autoupgrade = [bool]$_.AutoUpgrade }
   })
 }
-ConvertTo-Json -InputObject @($list) -Depth 3 -Compress
+ConvertTo-Json -InputObject @{ supported = [bool]$supported; entries = @($list) } -Depth 4 -Compress
 "#;
 
 const PS_SET: &str = r#"
@@ -515,18 +620,23 @@ impl DnsBackend for SystemDns {
         Ok(out)
     }
 
-    fn read_doh(&self) -> Result<Vec<DohEntry>> {
+    fn read_doh(&self) -> Result<DohState> {
         let v = crate::util::powershell_json(PS_READ_DOH, &[])?;
-        let raw = v.as_array().cloned().unwrap_or_default();
-        let mut out = Vec::new();
-        for item in raw {
+        let supported = v.get("supported").and_then(|x| x.as_bool()).unwrap_or(false);
+        let mut entries = Vec::new();
+        for item in v
+            .get("entries")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
             if let Ok(e) = serde_json::from_value::<DohEntry>(item) {
                 if !e.server.is_empty() {
-                    out.push(e);
+                    entries.push(e);
                 }
             }
         }
-        Ok(out)
+        Ok(DohState { supported, entries })
     }
 
     fn set_servers(&self, iface: &IfaceDns, family: Family, servers: &[String]) -> Result<()> {
@@ -578,7 +688,7 @@ mod tests {
     #[derive(Default)]
     struct MockDns {
         state: RefCell<Vec<IfaceDns>>,
-        doh: RefCell<Vec<DohEntry>>,
+        doh: RefCell<DohState>,
         /// Fail `read_all` after the first N calls (to simulate a crash).
         pub calls: RefCell<usize>,
         pub fail_read_all: RefCell<bool>,
@@ -591,16 +701,6 @@ mod tests {
             Self {
                 state: RefCell::new(ifaces),
                 ..Default::default()
-            }
-        }
-
-        fn set(&self, alias: &str, v4: Vec<&str>, v6: Vec<&str>, dhcp: bool) {
-            let mut st = self.state.borrow_mut();
-            if let Some(i) = st.iter_mut().find(|i| i.alias == alias) {
-                i.servers_v4 = v4.into_iter().map(String::from).collect();
-                i.servers_v6 = v6.into_iter().map(String::from).collect();
-                i.dhcp_v4 = dhcp;
-                i.dhcp_v6 = dhcp;
             }
         }
 
@@ -620,7 +720,7 @@ mod tests {
             Ok(self.state.borrow().clone())
         }
 
-        fn read_doh(&self) -> Result<Vec<DohEntry>> {
+        fn read_doh(&self) -> Result<DohState> {
             Ok(self.doh.borrow().clone())
         }
 
@@ -673,12 +773,13 @@ mod tests {
                 .borrow_mut()
                 .push(format!("doh {server} {template} {autoupgrade}"));
             let mut d = self.doh.borrow_mut();
-            match d.iter_mut().find(|e| e.server == server) {
+            let e = &mut d.entries;
+            match e.iter_mut().find(|e| e.server == server) {
                 Some(e) => {
                     e.template = template.to_string();
                     e.autoupgrade = autoupgrade;
                 }
-                None => d.push(DohEntry {
+                None => e.push(DohEntry {
                     server: server.to_string(),
                     template: template.to_string(),
                     autoupgrade,
@@ -689,7 +790,7 @@ mod tests {
 
         fn remove_doh(&self, server: &str) -> Result<()> {
             self.log.borrow_mut().push(format!("doh-rm {server}"));
-            self.doh.borrow_mut().retain(|e| e.server != server);
+            self.doh.borrow_mut().entries.retain(|e| e.server != server);
             Ok(())
         }
     }
@@ -700,6 +801,7 @@ mod tests {
             alias: alias.to_string(),
             index: 1,
             connected: true,
+            virtual_adapter: false,
             gateway: true,
             dhcp_v4: dhcp,
             dhcp_v6: dhcp,
@@ -712,7 +814,8 @@ mod tests {
     fn capture_persists_complete_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let be = MockDns::with(vec![iface("Ethernet", "{A}", &["10.0.0.1"], true)]);
-        be.doh.borrow_mut().push(DohEntry {
+        be.doh.borrow_mut().supported = true;
+        be.doh.borrow_mut().entries.push(DohEntry {
             server: "1.1.1.1".into(),
             template: "https://cloudflare-dns.com/dns-query".into(),
             autoupgrade: false,
@@ -720,7 +823,8 @@ mod tests {
         let snap = capture_and_save(dir.path(), &be, "tx-1").unwrap();
         assert!(snap.complete);
         assert_eq!(snap.interfaces.len(), 1);
-        assert_eq!(snap.doh.len(), 1);
+        assert!(snap.doh.supported);
+        assert_eq!(snap.doh.entries.len(), 1);
         match read_state(dir.path()).unwrap() {
             SnapshotState::Complete(s) => {
                 assert_eq!(s.interfaces[0].guid, "{A}");
@@ -780,6 +884,7 @@ mod tests {
             alias: "Eth".into(),
             index: 2,
             connected: true,
+            virtual_adapter: false,
             gateway: true,
             dhcp_v4: false,
             dhcp_v6: true,
@@ -838,21 +943,90 @@ mod tests {
     #[test]
     fn doh_restore_removes_new_and_restores_old() {
         let be = MockDns::with(vec![]);
-        be.doh.borrow_mut().push(DohEntry {
-            server: "1.1.1.1".into(),
-            template: "https://old/dns-query".into(),
-            autoupgrade: false,
-        });
-        let before = be.doh.borrow().clone();
+        {
+            let mut d = be.doh.borrow_mut();
+            d.supported = true;
+            d.entries.push(DohEntry {
+                server: "1.1.1.1".into(),
+                template: "https://old/dns-query".into(),
+                autoupgrade: false,
+            });
+        }
+        let before = be.doh.borrow().entries.clone();
         be.add_doh("1.1.1.1", "https://new/dns-query", true).unwrap();
         be.add_doh("9.9.9.9", "https://quad9/dns-query", true).unwrap();
         let outcomes = restore_doh(&be, &before, &["1.1.1.1".into(), "9.9.9.9".into()]);
         assert!(outcomes.iter().all(|o| o.ok), "{outcomes:?}");
         let doh = be.doh.borrow();
-        let cf = doh.iter().find(|d| d.server == "1.1.1.1").unwrap();
+        let cf = doh.entries.iter().find(|d| d.server == "1.1.1.1").unwrap();
         assert_eq!(cf.template, "https://old/dns-query");
         assert!(!cf.autoupgrade);
-        assert!(!doh.iter().any(|d| d.server == "9.9.9.9"));
+        assert!(!doh.entries.iter().any(|d| d.server == "9.9.9.9"));
+    }
+
+    #[test]
+    fn restore_is_a_noop_when_nothing_changed() {
+        let be = MockDns::with(vec![
+            iface("Ethernet", "{A}", &["10.0.0.1"], false),
+            iface("Wi-Fi", "{B}", &[], true),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let snap = capture_and_save(dir.path(), &be, "t").unwrap();
+        be.log.borrow_mut().clear();
+        let outcomes = restore(&be, &snap);
+        assert!(outcomes.iter().all(|o| o.ok), "{outcomes:?}");
+        assert!(
+            be.log.borrow().is_empty(),
+            "untouched interfaces must not be reset: {:?}",
+            be.log.borrow()
+        );
+    }
+
+    #[test]
+    fn verify_restored_reports_dhcp_and_static_mismatches() {
+        let be = MockDns::with(vec![
+            iface("Static", "{S}", &["10.0.0.1"], false),
+            iface("Auto", "{D}", &[], true),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let snap = capture_and_save(dir.path(), &be, "t").unwrap();
+        assert!(verify_restored(&be, &snap).unwrap().is_empty());
+        // Break the static one and make the DHCP one static.
+        be.set_servers(&snap.interfaces[0], Family::V4, &["9.9.9.9".into()])
+            .unwrap();
+        let problems = verify_restored(&be, &snap).unwrap();
+        assert!(problems.iter().any(|p| p.contains("Static")));
+    }
+
+    #[test]
+    fn restore_from_file_also_restores_doh_when_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let be = MockDns::with(vec![iface("Ethernet", "{A}", &["10.0.0.1"], false)]);
+        {
+            let mut d = be.doh.borrow_mut();
+            d.supported = true;
+            d.entries.push(DohEntry {
+                server: "1.1.1.1".into(),
+                template: "https://old/dns-query".into(),
+                autoupgrade: false,
+            });
+        }
+        let snap = capture_and_save(dir.path(), &be, "t").unwrap();
+        be.add_doh("1.1.1.1", "https://new/dns-query", true).unwrap();
+        be.add_doh("8.8.8.8", "https://dns.google/dns-query", true)
+            .unwrap();
+        restore_from_file(&snapshot_path(dir.path()), &be).unwrap();
+        let d = be.doh.borrow();
+        assert_eq!(
+            d.entries
+                .iter()
+                .find(|e| e.server == "1.1.1.1")
+                .unwrap()
+                .template,
+            "https://old/dns-query"
+        );
+        assert!(!d.entries.iter().any(|e| e.server == "8.8.8.8"));
+        let _ = snap;
     }
 
     #[test]
@@ -860,5 +1034,79 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(read_state(dir.path()).unwrap(), SnapshotState::Missing);
         assert!(!remove_snapshot(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn second_capture_keeps_the_original_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let be = MockDns::with(vec![iface("Ethernet", "{A}", &["10.0.0.1"], false)]);
+        let first = capture_and_save(dir.path(), &be, "tx-1").unwrap();
+        assert_eq!(first.interfaces[0].servers_v4, vec!["10.0.0.1"]);
+        // Now the machine is on public DNS (that is what we set).
+        be.set_servers(&first.interfaces[0], Family::V4, &["1.1.1.1".into()])
+            .unwrap();
+        let second = capture_and_save(dir.path(), &be, "tx-2").unwrap();
+        assert_eq!(
+            second.interfaces[0].servers_v4,
+            vec!["10.0.0.1"],
+            "re-enabling must keep the state from before the first change"
+        );
+        assert!(second.complete);
+    }
+
+    #[test]
+    fn active_prefers_physical_adapters() {
+        let mut snap = DnsSnapshot::empty("t");
+        snap.interfaces = vec![
+            IfaceDns {
+                virtual_adapter: true,
+                gateway: true,
+                alias: "tun0".into(),
+                guid: "{V}".into(),
+                connected: true,
+                ..iface("tun0", "{V}", &[], true)
+            },
+            iface("Ethernet", "{P}", &[], true),
+        ];
+        let active = snap.active();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].alias, "Ethernet");
+    }
+
+    #[test]
+    fn active_falls_back_to_a_virtual_gateway() {
+        let mut snap = DnsSnapshot::empty("t");
+        snap.interfaces = vec![IfaceDns {
+            virtual_adapter: true,
+            ..iface("tun0", "{V}", &[], true)
+        }];
+        assert_eq!(snap.active().len(), 1);
+    }
+
+    /// Read-only end-to-end check of the real PowerShell backend.
+    ///
+    /// Not part of the normal suite: it queries the live machine (no changes)
+    /// and is meant for manual verification:
+    /// `cargo test --release -- --ignored --nocapture system_backend_reads_real_dns`
+    #[test]
+    #[ignore = "read-only check against the real machine"]
+    fn system_backend_reads_real_dns() {
+        let ifaces = SystemDns.read_all().expect("read_all via PowerShell");
+        assert!(!ifaces.is_empty(), "at least one adapter expected");
+        for i in &ifaces {
+            println!(
+                "{} ({}) up={} gw={} dhcp4={} v4=[{}] dhcp6={} v6=[{}]",
+                i.alias,
+                i.guid,
+                i.connected,
+                i.gateway,
+                i.dhcp_v4,
+                i.servers_v4.join(","),
+                i.dhcp_v6,
+                i.servers_v6.join(",")
+            );
+        }
+        let doh = SystemDns.read_doh().expect("read_doh");
+        println!("DoH supported: {} entries: {}", doh.supported, doh.entries.len());
     }
 }

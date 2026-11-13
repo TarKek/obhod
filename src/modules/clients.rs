@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+use crate::modules::update::{cleanup_staging, install_dir, prepare_from_zip};
 use crate::modules::{detect, servesub, Ctx};
 use crate::util;
 
@@ -69,64 +70,92 @@ fn label(app: &str) -> &'static str {
     }
 }
 
-fn install(ctx: &Ctx, app: &str, target_dir: &Path) -> Result<PathBuf> {
+/// Updates a portable copy in place: download → verify archive → swap the
+/// directory with a backup and rollback. The old copy stays untouched until
+/// the new one is fully verified.
+pub fn update_copy(ctx: &Ctx) -> Result<PathBuf> {
+    let app = ctx.opts.client.as_str();
+    if app == "none" || app.is_empty() {
+        anyhow::bail!("VPN-клиент не выбран");
+    }
+    let parent = if ctx.opts.client_dir.as_os_str().is_empty() {
+        detect::dir_local_appdata().join("Programs")
+    } else {
+        ctx.opts.client_dir.clone()
+    };
+    std::fs::create_dir_all(&parent)?;
+    let exe = install(ctx, app, &parent)?;
+    if exe.exists() {
+        match std::process::Command::new(&exe).spawn() {
+            Ok(_) => ctx.log(format!("✓ {} запущен.", label(app))),
+            Err(e) => ctx.log(format!("⚠ не удалось запустить {}: {e}", exe.display())),
+        }
+    }
+    Ok(exe)
+}
+
+fn portable_spec(app: &str) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    match app {
+        "hiddify" => Some(("hiddify/hiddify-app", "portable", "Hiddify.exe", "hiddify")),
+        "v2rayn" => Some(("2dust/v2rayN", "windows-64", "v2rayN.exe", "v2rayn")),
+        _ => None,
+    }
+}
+
+fn install_portable(ctx: &Ctx, app: &str, target_dir: &Path) -> Result<PathBuf> {
+    let (repo, needle, exe_name, folder) =
+        portable_spec(app).ok_or_else(|| anyhow::anyhow!("неизвестное приложение: {app}"))?;
+    ctx.log(format!("Скачиваю {} (портативная версия)...", label(app)));
     let client = util::http_client()?;
     let dl = ctx.dir("downloads");
     std::fs::create_dir_all(&dl)?;
+    let zip = util::github_asset_filtered(&client, repo, ".zip", needle, &dl)?;
+    ctx.log("Проверяю архив и распаковываю в staging...");
+    let staged = prepare_from_zip(&zip, &ctx.dir("staging"), exe_name, None)?;
+    let target = target_dir.join(folder);
+    let report = install_dir(&staged, &target, exe_name, &ctx.dir("backup"))?;
+    cleanup_staging(&ctx.dir("staging"), &report.target);
+    ctx.log(format!(
+        "✓ {} распакован: {} (резервная копия: {})",
+        label(app),
+        target.display(),
+        report
+            .backup
+            .as_ref()
+            .map(|b| b.display().to_string())
+            .unwrap_or_else(|| "нет".into())
+    ));
+    Ok(report.exe)
+}
 
+fn install(ctx: &Ctx, app: &str, target_dir: &Path) -> Result<PathBuf> {
     match app {
-        "hiddify" => {
-            ctx.log("Скачиваю Hiddify (портативная версия)...");
-            let zip = util::github_asset_filtered(
-                &client,
-                "hiddify/hiddify-app",
-                ".zip",
-                "portable",
-                &dl,
-            )?;
-            let dir = target_dir.join("hiddify");
-            util::unzip(&zip, &dir)?;
-            let exe = find_exe(&dir, "Hiddify.exe")
-                .ok_or_else(|| anyhow::anyhow!("в архиве Hiddify нет Hiddify.exe"))?;
-            ctx.log(format!("✓ Hiddify распакован: {}", dir.display()));
-            Ok(exe)
-        }
-        "v2rayn" => {
-            ctx.log("Скачиваю v2rayN (портативная версия)...");
-            let zip = util::github_asset_filtered(
-                &client,
-                "2dust/v2rayN",
-                ".zip",
-                "windows-64.zip",
-                &dl,
-            )?;
-            let dir = target_dir.join("v2rayn");
-            util::unzip(&zip, &dir)?;
-            let exe = find_exe(&dir, "v2rayN.exe")
-                .ok_or_else(|| anyhow::anyhow!("в архиве v2rayN нет v2rayN.exe"))?;
-            ctx.log(format!("✓ v2rayN распакован: {}", dir.display()));
-            Ok(exe)
-        }
-        "happ" => {
-            ctx.log("Скачиваю установщик Happ...");
-            let setup =
-                util::github_asset_filtered(&client, "Happ-proxy/happ-desktop", ".exe", "x64", &dl)?;
-            ctx.log("Устанавливаю Happ тихо (без мастера)...");
-            let out = std::process::Command::new(&setup)
-                .arg("/S")
-                .spawn()
-                .and_then(|mut c| c.wait())
-                .map_err(|e| anyhow::anyhow!("запуск установщика Happ: {e}"))?;
-            if !out.success() {
-                ctx.log("⚠ установщик Happ завершился с ошибкой, пробую найти программу.");
-            }
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            let dir = detect::dir_local_appdata().join("Programs").join("Happ");
-            find_exe(&dir, "Happ.exe")
-                .ok_or_else(|| anyhow::anyhow!("Happ установился, но Happ.exe не найден"))
-        }
+        "hiddify" | "v2rayn" => install_portable(ctx, app, target_dir),
+        "happ" => install_happ(ctx),
         _ => anyhow::bail!("неизвестное приложение: {app}"),
     }
+}
+
+fn install_happ(ctx: &Ctx) -> Result<PathBuf> {
+    let client = util::http_client()?;
+    let dl = ctx.dir("downloads");
+    std::fs::create_dir_all(&dl)?;
+    ctx.log("Скачиваю установщик Happ...");
+    let setup =
+        util::github_asset_filtered(&client, "Happ-proxy/happ-desktop", ".exe", "x64", &dl)?;
+    ctx.log("Устанавливаю Happ тихо (без мастера)...");
+    let out = std::process::Command::new(&setup)
+        .arg("/S")
+        .spawn()
+        .and_then(|mut c| c.wait())
+        .map_err(|e| anyhow::anyhow!("запуск установщика Happ: {e}"))?;
+    if !out.success() {
+        ctx.log("⚠ установщик Happ завершился с ошибкой, пробую найти программу.");
+    }
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let dir = detect::dir_local_appdata().join("Programs").join("Happ");
+    find_exe(&dir, "Happ.exe")
+        .ok_or_else(|| anyhow::anyhow!("Happ установился, но Happ.exe не найден"))
 }
 
 fn find_exe(dir: &Path, exe: &str) -> Option<PathBuf> {
@@ -176,6 +205,9 @@ pub fn prepare_subscription(ctx: &Ctx) -> Result<()> {
         util::set_clipboard(&url);
         ctx.log("✓ Ссылка на подписку скопирована в буфер обмена.");
         ctx.log(format!("  {}", import_hint(app)));
+        if let (_, Some(plain)) = servesub::urls() {
+            ctx.log(format!("  Обычный текст без base64: {plain}"));
+        }
         ctx.log(format!(
             "  Ссылка работает, пока открыто это окно {}.",
             crate::brand::name()

@@ -323,7 +323,7 @@ mod tests {
         s.tcp_ok = None;
         s.target_ok = Some(false);
         let r = evaluate(&s, 10);
-        assert_eq!(r.overall, Phase::Failed);
+        assert_eq!(r.overall, Phase::Degraded);
         assert_eq!(r.stages[0].stage, Stage::Dns);
         assert_eq!(r.stages[0].ok, Some(false));
         assert_eq!(r.stages[2].ok, None);

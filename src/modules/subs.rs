@@ -100,7 +100,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         ));
     }
     if batch.items.is_empty() {
-        stats.kept_previous = keep_previous(ctx, &stats, "в источниках нет разобранных узлов");
+        keep_previous(ctx, &stats, "в источниках нет разобранных узлов");
         return Ok(());
     }
 
@@ -124,7 +124,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
             let Some(cand) = next else { break };
             let r = proxy::probe_info(&cand.info, &cfg);
             let msg = Alive {
-                ms: r.latency_ms.unwrap_or(0),
+                ms: r.latency_ms.unwrap_or(0) as u128,
                 link: cand.link,
                 ip: r.endpoint_ip.map(|i| i.to_string()),
                 tls_verified: r.tls_verified,
@@ -143,13 +143,22 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     }
     stats.tested = all.len();
     stats.dead = all.iter().filter(|a| !a.verdict.alive()).count();
+    let mut dead_examples: Vec<String> = Vec::new();
+    for a in all.iter().filter(|a| !a.verdict.alive()) {
+        if dead_examples.len() >= 3 {
+            break;
+        }
+        if !a.summary.is_empty() && !dead_examples.contains(&a.summary) {
+            dead_examples.push(a.summary.clone());
+        }
+    }
     let mut alive: Vec<Alive> = all.into_iter().filter(|a| a.verdict.alive()).collect();
     stats.alive = alive.len();
     stats.tls_ok = alive.iter().filter(|a| a.tls_verified).count();
     alive.sort_by_key(|a| a.ms);
 
     if alive.is_empty() {
-        stats.kept_previous = keep_previous(ctx, &stats, "ни один узел не ответил (TCP/TLS)");
+        keep_previous(ctx, &stats, "ни один узел не ответил (TCP/TLS)");
         return Ok(());
     }
 
@@ -172,6 +181,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     let save = save_alive(&ctx.data, &nodes)?;
     if let SaveOutcome::KeptPrevious(n) = save {
         stats.kept_previous = n;
+        let _ = write_state(&ctx.data, &stats, true);
         return Ok(());
     }
     write_state(&ctx.data, &stats, false)?;
@@ -184,6 +194,13 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         "  Источники: {}/{} · разобрано {} · дублей {} · некорректных {}",
         stats.sources_ok, stats.sources_total, stats.unique, stats.duplicate, stats.invalid
     ));
+    if !dead_examples.is_empty() {
+        ctx.log(format!(
+            "  Примеры отказов (всего {}): {}",
+            stats.dead,
+            dead_examples.join(" · ")
+        ));
+    }
     ctx.log(
         "  Проверка честная: открытый порт — это не «рабочий прокси», вход в узел не проверялся.",
     );
@@ -352,7 +369,6 @@ struct Alive {
     ip: Option<String>,
     tls_verified: bool,
     verdict: proxy::Verdict,
-    #[allow(dead_code)]
     summary: String,
 }
 
@@ -408,7 +424,7 @@ fn write_state(data: &Path, s: &Stats, kept: bool) -> Result<()> {
     });
     atomic_write(
         &data.join("subs_state.json"),
-        serde_json::to_vec_pretty(&state)?.as_bytes(),
+        &serde_json::to_vec_pretty(&state)?,
     )?;
     Ok(())
 }
@@ -643,7 +659,7 @@ mod tests {
             .count();
         assert_eq!(temps, 0);
         let plain = std::fs::read_to_string(dir.path().join("subs_alive_plain.txt")).unwrap();
-        assert!(!plain.contains('#'));
+        assert!(plain.lines().all(|l| !l.starts_with('#')));
         assert!(plain.trim_end().starts_with("vless://"));
     }
 
@@ -695,7 +711,7 @@ mod tests {
     fn geo_failure_keeps_every_alive_node() {
         let alive: Vec<Alive> = (1..=3)
             .map(|i| Alive {
-                ms: i * 10,
+                ms: i as u128 * 10,
                 link: vless(&format!("h{i}.example"), 443, UUID_A, "n"),
                 ip: Some(format!("1.1.1.{i}")),
                 tls_verified: false,

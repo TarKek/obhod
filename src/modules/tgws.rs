@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::modules::Ctx;
 use crate::util;
@@ -7,10 +7,16 @@ use crate::util;
 const REPO: &str = "Flowseal/tg-ws-proxy";
 
 pub fn run(ctx: &Ctx) -> Result<()> {
+    run_from(ctx, None)
+}
+
+/// Starts TgWsProxy, optionally using an already verified copy (the updater
+/// stages and checks the file first, then asks this function to run it).
+pub fn run_from(ctx: &Ctx, provided: Option<&Path>) -> Result<()> {
     let dir = ctx.dir("tgws");
     std::fs::create_dir_all(&dir)?;
 
-    if ctx.opts.keep_tgws {
+    if provided.is_none() && ctx.opts.keep_tgws {
         if let Some(p) = find_existing() {
             ctx.log(format!("TgWsProxy уже есть — использую его: {}", p.display()));
             let _ = std::process::Command::new(&p)
@@ -22,21 +28,27 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         }
     }
 
-    let exe = match find_existing() {
+    let exe = match provided {
         Some(p) => {
-            ctx.log(format!("Найден локально: {}", p.display()));
-            p
+            ctx.log(format!("Использую проверенную копию: {}", p.display()));
+            p.to_path_buf()
         }
-        None => {
-            ctx.log("Скачиваю TgWsProxy с GitHub...");
-            let client = util::http_client()?;
-            let dl = ctx.dir("downloads");
-            std::fs::create_dir_all(&dl)?;
-            let file = util::github_asset(&client, REPO, ".exe", &dl)?;
-            let dest = dir.join(file.file_name().unwrap_or_default());
-            std::fs::copy(&file, &dest)?;
-            dest
-        }
+        None => match find_existing() {
+            Some(p) => {
+                ctx.log(format!("Найден локально: {}", p.display()));
+                p
+            }
+            None => {
+                ctx.log("Скачиваю TgWsProxy с GitHub...");
+                let client = util::http_client()?;
+                let dl = ctx.dir("downloads");
+                std::fs::create_dir_all(&dl)?;
+                let file = util::github_asset(&client, REPO, ".exe", &dl)?;
+                let dest = dir.join(file.file_name().unwrap_or_default());
+                std::fs::copy(&file, &dest)?;
+                dest
+            }
+        },
     };
 
     // TgWsProxy is a GUI bridge; start it detached.

@@ -298,6 +298,7 @@ pub fn parse_reg_query_value(stdout: &str, name: &str) -> Option<String> {
             continue;
         };
         // "<name>    REG_SZ    <data>"
+        let rest = rest.trim_start();
         let mut it = rest.splitn(2, char::is_whitespace);
         let kind = it.next().unwrap_or("").trim();
         if !kind.starts_with("REG_") {
@@ -718,6 +719,7 @@ pub fn base64(s: &str) -> String {
     out
 }
 
+#[allow(dead_code)] // used by modules and tests; kept for callers that need a stamp
 pub fn timestamp() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -809,8 +811,7 @@ mod tests {
     #[test]
     fn checked_command_reports_nonzero_exit() {
         let err = run_checked("reg", &["query", r"HKLM\Software\__obhod_missing_key__"])
-            .err()
-            .expect("missing registry key must fail");
+            .expect_err("missing registry key must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("код"), "message should mention the code: {msg}");
     }

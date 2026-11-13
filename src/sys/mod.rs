@@ -9,6 +9,10 @@
 //!   journal alone — see [`journal::recover_pending_with`];
 //! * no shell strings: values travel as `Command::args` or as base64 JSON in an
 //!   environment variable, never interpolated into a command line.
+//!
+//! The layer is a public API for the rest of the crate: some helpers are used
+//! only by tests or reserved for the UI, hence the module-wide allow.
+#![allow(dead_code)]
 
 pub mod dns_state;
 pub mod fsx;
@@ -17,7 +21,8 @@ pub mod journal;
 pub mod proc;
 pub mod transaction;
 
-pub use dns_state::{DnsBackend, DnsSnapshot, Family, IfaceDns, SnapshotState};
+#[allow(unused_imports)]
+pub use dns_state::{DnsBackend, DnsSnapshot, DohEntry, DohState, Family, IfaceDns, SnapshotState};
 // Re-exported for modules; a binary crate still warns about unused re-exports
 // until every caller lands, so the allow is deliberate.
 #[allow(unused_imports)]
@@ -51,7 +56,7 @@ impl UndoExecutor for SystemUndo {
     }
 
     fn delete_file(&self, path: &Path) -> Result<()> {
-        fsx::RealFs.remove(path)?;
+        fsx::RealFs::remove(path)?;
         Ok(())
     }
 

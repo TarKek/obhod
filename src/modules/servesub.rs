@@ -73,7 +73,9 @@ impl ServerConfig {
 pub struct Server {
     pub url: String,
     pub url_plain: String,
+    #[allow(dead_code)] // used by tests and by callers that log the port
     pub port: u16,
+    #[allow(dead_code)] // used by tests; kept for diagnostics
     pub token: String,
     shared: Arc<Shared>,
     /// Keep the accept thread alive for the process when true.
@@ -254,15 +256,18 @@ fn parse_request(head: &str) -> Result<Request, ParseError> {
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Base64,
     Plain,
 }
 
+/// Reads query parameters without aborting on a malformed pair.
 fn query_token(query: &str) -> Option<String> {
     for pair in query.split('&') {
-        let (k, v) = pair.split_once('=')?;
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
         if k.eq_ignore_ascii_case("token") && !v.is_empty() {
             return Some(v.to_string());
         }
@@ -271,14 +276,15 @@ fn query_token(query: &str) -> Option<String> {
 }
 
 /// Maps `/sub/<token>`, `/sub.txt/<token>`, `/sub?token=…` to a route. Returns
-/// `None` for unknown paths; token checking is done by the caller.
-fn route(path: &str, query: &str) -> Option<(Kind, String)> {
+/// `None` for unknown paths; `Some((kind, None))` means "route exists but the
+/// token is missing" (answered with 403, not 404).
+fn route(path: &str, query: &str) -> Option<(Kind, Option<String>)> {
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match segs.as_slice() {
-        ["sub", token] => Some((Kind::Base64, (*token).to_string())),
-        ["sub.txt", token] => Some((Kind::Plain, (*token).to_string())),
-        ["sub"] => Some((Kind::Base64, query_token(query)?)),
-        ["sub.txt"] => Some((Kind::Plain, query_token(query)?)),
+        ["sub", token] => Some((Kind::Base64, Some((*token).to_string()))),
+        ["sub.txt", token] => Some((Kind::Plain, Some((*token).to_string()))),
+        ["sub"] => Some((Kind::Base64, query_token(query))),
+        ["sub.txt"] => Some((Kind::Plain, query_token(query))),
         _ => None,
     }
 }
@@ -348,6 +354,10 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
 
     let Some((kind, token)) = route(&req.path, &req.query) else {
         let _ = respond(&mut stream, 404, "Not Found", &[], b"not found\n", false);
+        return;
+    };
+    let Some(token) = token else {
+        let _ = respond(&mut stream, 403, "Forbidden", &[], b"bad token\n", false);
         return;
     };
     if !ct_eq(token.as_bytes(), shared.token.as_bytes()) {
@@ -623,15 +633,15 @@ mod tests {
 
     #[test]
     fn plain_route_rejects_unknown_shapes() {
-        assert!(route("/sub", "").is_none());
+        assert_eq!(route("/sub", ""), Some((Kind::Base64, None)));
         assert!(route("/sub/x/y", "").is_none());
         assert_eq!(
             route("/sub.txt/tok", ""),
-            Some((Kind::Plain, "tok".into()))
+            Some((Kind::Plain, Some("tok".into())))
         );
         assert_eq!(
             route("/sub", "a=1&token=abc"),
-            Some((Kind::Base64, "abc".into()))
+            Some((Kind::Base64, Some("abc".into())))
         );
     }
 }

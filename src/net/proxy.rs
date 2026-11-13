@@ -919,7 +919,12 @@ mod tests {
         assert!(!r.tcp_ok);
         assert_eq!(r.verdict, Verdict::Failed);
         let f = r.failure.unwrap();
-        assert_eq!(f.kind, FailureKind::Connect);
+        // Windows may report a closed local port as "refused" or as a timeout.
+        assert!(
+            matches!(f.kind, FailureKind::Connect | FailureKind::Timeout),
+            "{f:?}"
+        );
+        assert_eq!(f.stage, Stage::Connect);
         assert!(r.attempts >= 1);
     }
 

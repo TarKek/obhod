@@ -21,7 +21,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::net::{b64_decode, sha256_hex};
+use crate::net::{b64_decode, b64_decode_text, sha256_hex};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
@@ -430,12 +430,6 @@ fn parse_vless(rest: &str) -> Result<LinkInfo, LinkError> {
         return Err(LinkError::new("id", "пустой идентификатор пользователя"));
     }
     let tls = security_tls(&p.query, false)?;
-    if let Some(enc) = p.query.get("encryption") {
-        if !enc.trim().is_empty() && !enc.eq_ignore_ascii_case("none") {
-            // Not fatal, but Xray only supports `none` in practice.
-            // Keep as a warning so such nodes are not silently kept.
-        }
-    }
     let transport = check_transport(p.query.get("type").map(String::as_str).unwrap_or("tcp"))?;
     let (sni, mut warnings) = sni_from(&p.query, &p.host, tls);
     if tls
@@ -443,7 +437,7 @@ fn parse_vless(rest: &str) -> Result<LinkInfo, LinkError> {
             .get("security")
             .map(|s| s.eq_ignore_ascii_case("reality"))
             .unwrap_or(false)
-        && p.query.get("pbk").is_none()
+        && !p.query.contains_key("pbk")
     {
         warnings.push("reality без pbk (публичного ключа)".into());
     }
@@ -692,9 +686,12 @@ fn parse_tuic(rest: &str) -> Result<LinkInfo, LinkError> {
 
 fn parse_tg(rest: &str) -> Result<LinkInfo, LinkError> {
     // tg://proxy?server=...&port=...&secret=...
-    let (_, fragment) = rest.split_once('#').unwrap_or((rest, ""));
-    let q = parse_query(rest);
-    parse_mtproto_fields(&q, fragment)
+    let (before_frag, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let query = before_frag
+        .split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or("");
+    parse_mtproto_fields(&parse_query(query), fragment)
 }
 
 fn parse_tme(rest: &str) -> Result<LinkInfo, LinkError> {
@@ -702,8 +699,12 @@ fn parse_tme(rest: &str) -> Result<LinkInfo, LinkError> {
     if !rest.starts_with("t.me/proxy") && !rest.starts_with("telegram.me/proxy") {
         return Err(LinkError::new("link", "поддерживается только t.me/proxy"));
     }
-    let q = parse_query(rest);
-    parse_mtproto_fields(&q, "")
+    let (before_frag, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let query = before_frag
+        .split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or("");
+    parse_mtproto_fields(&parse_query(query), fragment)
 }
 
 fn parse_mtproto_fields(
@@ -919,7 +920,7 @@ mod tests {
         // 16 bytes base64 (standard alphabet)
         let b64 = crate::util::base64("\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\u{9}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}");
         let norm = normalize_mtproto_secret(&b64).unwrap();
-        assert_eq!(norm, "0102030405060708090a0b0c0d0e0f10");
+        assert_eq!(norm, "01020304050607080910111213141516");
 
         let l = parse(&format!(
             "tg://proxy?server=1.2.3.4&port=443&secret={}",

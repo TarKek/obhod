@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::modules::Ctx;
 use crate::net::links;
 use crate::net::proxy::{self, ProbeConfig};
-use crate::net::{self, atomic_write};
+use crate::net::atomic_write;
 use crate::util;
 
 const SOURCES: &[&str] = &[
@@ -286,14 +286,6 @@ pub fn valid_secret(raw: &str) -> Option<String> {
     links::normalize_mtproto_secret(raw)
 }
 
-/// Convenience for the diagnostics/report layer: structural check only.
-pub fn looks_valid(link: &str) -> bool {
-    parse_link(link).is_some()
-}
-
-/// Keeps the module honest: MTProto protocol verification is not implemented.
-pub const PROTOCOL_VERIFIED: bool = false;
-
 /// Re-exported for callers that want a probe without parsing Telegram sources.
 pub fn probe(host: &str, port: u16, secret: &str, cfg: &ProbeConfig) -> proxy::ProbeResult {
     proxy::probe_mtproto(host, port, Some(secret), cfg)
@@ -308,9 +300,6 @@ pub fn default_probe_config() -> ProbeConfig {
         ..ProbeConfig::default()
     }
 }
-
-/// Re-export so callers do not need to import `net` directly.
-pub type MtProbeConfig = ProbeConfig;
 
 #[cfg(test)]
 mod tests {
@@ -336,7 +325,7 @@ mod tests {
         // base64 secret (16 bytes) is normalized to hex
         let b64 = util::base64("\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\u{9}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}");
         let c = parse_link(&format!("tg://proxy?server=h&port=1&secret={b64}")).unwrap();
-        assert_eq!(c.secret, "0102030405060708090a0b0c0d0e0f10");
+        assert_eq!(c.secret, "01020304050607080910111213141516");
     }
 
     #[test]
@@ -371,6 +360,5 @@ mod tests {
         assert!(valid_secret("ee0123456789abcdef0123456789abcdef").is_some());
         assert!(valid_secret("0123456789").is_none());
         assert!(valid_secret("%30%31%32%33%34%35%36%37%38%39abcdef0123456789abcdef").is_some());
-        assert!(!PROTOCOL_VERIFIED);
     }
 }

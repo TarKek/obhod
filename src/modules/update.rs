@@ -86,19 +86,23 @@ fn short(v: &str) -> String {
 // verification fails, the old version is put back automatically.
 
 /// Verified payload waiting to be swapped in.
+#[derive(Debug)]
 pub struct Staging {
     pub root: PathBuf,
     /// Expected executable (for archives) or the staged copy of it.
     pub exe: PathBuf,
     pub sha256: String,
+    #[allow(dead_code)] // reported by tests and future UI
     pub entries: usize,
 }
 
+#[derive(Debug)]
 pub struct InstallReport {
     pub target: PathBuf,
     pub exe: PathBuf,
     pub backup: Option<PathBuf>,
     pub sha256: String,
+    #[allow(dead_code)] // used by tests; kept for the UI's "what changed" view
     pub moved_old: bool,
 }
 
@@ -141,7 +145,7 @@ fn verify_zip(zip: &Path) -> Result<usize> {
     const MAX_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
     let f = fs::File::open(zip).with_context(|| format!("открыть {}", zip.display()))?;
     let mut ar = zip::ZipArchive::new(f).context("архив не читается как zip")?;
-    if ar.len() == 0 {
+    if ar.is_empty() {
         bail!("архив пуст");
     }
     let mut total: u64 = 0;
@@ -507,7 +511,7 @@ fn update_own_exe(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("component.exe"));
     let report = install_exe(&staged, &target_dir.join(name), &ctx.dir("backup"))?;
-    cleanup_staging(&staging_root, &staged.root);
+    cleanup_staging(&staging_root, &report.target);
     ctx.log(format!(
         "  проверено: sha256 {}… · резервная копия: {}",
         &report.sha256[..12],
@@ -944,7 +948,7 @@ fn update_found_tgws(
     }
     match install_exe(&staged, path, &ctx.dir("backup")) {
         Ok(report) => {
-            cleanup_staging(&ctx.dir("staging"), &staged.root);
+            cleanup_staging(&ctx.dir("staging"), &report.target);
             st.set_tool("tgws", &latest);
             ctx.log(format!(
                 "✓ TgWsProxy обновлён (резервная копия: {})",
@@ -1009,5 +1013,188 @@ fn forced_ctx(ctx: &Ctx) -> Ctx {
         opts,
         tx: ctx.tx.clone(),
         admin: ctx.admin,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn fake_exe(tag: &[u8]) -> Vec<u8> {
+        let mut v = b"MZ".to_vec();
+        v.extend_from_slice(tag);
+        v
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, Vec<u8>)]) {
+        let f = fs::File::create(path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(data).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    #[test]
+    fn prepares_and_installs_a_single_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("new.exe");
+        fs::write(&src, fake_exe(b"new")).unwrap();
+        let staging = dir.path().join("staging");
+        let staged = prepare_from_exe(&src, &staging, None).unwrap();
+        assert_eq!(sha256_file(&staged.exe).unwrap(), staged.sha256);
+        assert_eq!(staged.entries, 1);
+
+        let target = dir.path().join("app").join("TgWsProxy.exe");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"MZold").unwrap();
+        let report = install_exe(&staged, &target, &dir.path().join("backup")).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), fake_exe(b"new"));
+        assert_eq!(sha256_file(&target).unwrap(), report.sha256);
+        let backup = report.backup.expect("backup");
+        assert_eq!(fs::read(&backup).unwrap(), b"MZold");
+        assert!(report.moved_old);
+    }
+
+    #[test]
+    fn rejects_non_exe_and_bad_hash_before_touching_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_exe = dir.path().join("readme.exe");
+        fs::write(&not_exe, b"plain text, not a program").unwrap();
+        assert!(prepare_from_exe(&not_exe, &dir.path().join("staging"), None).is_err());
+
+        let good = dir.path().join("good.exe");
+        fs::write(&good, fake_exe(b"x")).unwrap();
+        let wrong = "0".repeat(64);
+        assert!(
+            prepare_from_exe(&good, &dir.path().join("staging"), Some(&wrong)).is_err()
+        );
+
+        // Nothing left behind by the failed attempts.
+        let leftovers = fs::read_dir(dir.path().join("staging"))
+            .map(|rd| rd.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn tampered_staging_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("app.exe");
+        fs::write(&src, fake_exe(b"new")).unwrap();
+        let mut staged = prepare_from_exe(&src, &dir.path().join("staging"), None).unwrap();
+        staged.sha256 = "0".repeat(64);
+        let target = dir.path().join("app").join("app.exe");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"MZold").unwrap();
+
+        assert!(install_exe(&staged, &target, &dir.path().join("backup")).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"MZold");
+    }
+
+    #[test]
+    fn verifies_and_extracts_a_zip_with_the_expected_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip = dir.path().join("component.zip");
+        write_zip(
+            &zip,
+            &[
+                ("bin/winws.exe", fake_exe(b"payload")),
+                ("readme.txt", b"hello".to_vec()),
+            ],
+        );
+        let staged =
+            prepare_from_zip(&zip, &dir.path().join("staging"), "winws.exe", None).unwrap();
+        assert!(staged.exe.ends_with("winws.exe"));
+        assert_eq!(staged.entries, 2);
+        assert!(fs::read(&staged.exe).unwrap().starts_with(b"MZ"));
+    }
+
+    #[test]
+    fn rejects_broken_or_incompatible_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+
+        let junk = dir.path().join("junk.zip");
+        fs::write(&junk, b"this is not a zip").unwrap();
+        assert!(prepare_from_zip(&junk, &staging, "winws.exe", None).is_err());
+
+        let no_exe = dir.path().join("no-exe.zip");
+        write_zip(&no_exe, &[("readme.txt", b"hi".to_vec())]);
+        let err = prepare_from_zip(&no_exe, &staging, "winws.exe", None).unwrap_err();
+        assert!(format!("{err:#}").contains("winws.exe"));
+
+        let good = dir.path().join("good.zip");
+        write_zip(&good, &[("winws.exe", fake_exe(b"a"))]);
+        let wrong = "1".repeat(64);
+        assert!(prepare_from_zip(&good, &staging, "winws.exe", Some(&wrong)).is_err());
+        // No half-extracted staging directories survive failures.
+        let leftovers = fs::read_dir(&staging).map(|rd| rd.count()).unwrap_or(0);
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn installs_a_directory_with_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("program");
+        fs::create_dir_all(old.join("bin")).unwrap();
+        fs::write(old.join("old.txt"), b"old version").unwrap();
+        fs::write(old.join("bin").join("winws.exe"), b"MZold").unwrap();
+
+        let zip = dir.path().join("new.zip");
+        write_zip(&zip, &[("bin/winws.exe", fake_exe(b"new"))]);
+        let staged =
+            prepare_from_zip(&zip, &dir.path().join("staging"), "winws.exe", None).unwrap();
+        let backup_root = dir.path().join("backup");
+        let report = install_dir(&staged, &old, "winws.exe", &backup_root).unwrap();
+
+        assert_eq!(
+            fs::read(old.join("bin").join("winws.exe")).unwrap(),
+            fake_exe(b"new")
+        );
+        assert!(!old.join("old.txt").exists());
+        let backup = report.backup.expect("backup");
+        assert_eq!(fs::read(backup.join("old.txt")).unwrap(), b"old version");
+        assert!(report.exe.ends_with("winws.exe"));
+        // Staging was moved, not copied, when on the same volume.
+        assert!(!staged.root.exists() || staged.root == old);
+    }
+
+    #[test]
+    fn incompatible_directory_update_preserves_the_old_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("program");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep.txt"), b"working").unwrap();
+
+        let shadow = dir.path().join("staged");
+        fs::create_dir_all(&shadow).unwrap();
+        fs::write(shadow.join("other.exe"), fake_exe(b"other")).unwrap();
+        let staged = Staging {
+            root: shadow,
+            exe: dir.path().join("other.exe"),
+            sha256: "0".repeat(64),
+            entries: 1,
+        };
+        assert!(install_dir(&staged, &target, "winws.exe", &dir.path().join("backup")).is_err());
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"working");
+    }
+
+    #[test]
+    fn cleanup_staging_removes_everything_but_the_kept_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = dir.path().join("keep");
+        let old = dir.path().join("old");
+        fs::create_dir_all(&keep).unwrap();
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("x"), b"x").unwrap();
+        cleanup_staging(dir.path(), &keep);
+        assert!(keep.exists());
+        assert!(!old.exists());
     }
 }

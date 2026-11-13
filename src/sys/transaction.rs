@@ -27,6 +27,7 @@ pub struct TxHandle<'a> {
 }
 
 impl<'a> TxHandle<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
         component: &str,
@@ -155,16 +156,13 @@ impl TxResult {
 pub fn run(component: &str, journal: &Journal, mut steps: Vec<Box<dyn Step>>) -> TxResult {
     let tx = journal.new_tx_id();
     let mut res = TxResult::new(tx.clone());
-    let mut undos: Vec<(usize, Undo)> = Vec::new();
     let mut applied: Vec<usize> = Vec::new();
 
     let outcome = execute(
         component,
         journal,
-        &mut res,
         &tx,
         steps.as_mut_slice(),
-        &mut undos,
         &mut applied,
     );
 
@@ -184,10 +182,8 @@ pub fn run(component: &str, journal: &Journal, mut steps: Vec<Box<dyn Step>>) ->
 fn execute(
     component: &str,
     journal: &Journal,
-    res: &mut TxResult,
     tx: &str,
     steps: &mut [Box<dyn Step>],
-    undos: &mut Vec<(usize, Undo)>,
     applied: &mut Vec<usize>,
 ) -> Result<()> {
     let h = TxHandle {
@@ -196,13 +192,12 @@ fn execute(
     };
 
     // ── Snapshot ──────────────────────────────────────────────────────────
-    for (i, step) in steps.iter_mut().enumerate() {
+    for step in steps.iter_mut() {
         let comp = step.component().to_string();
         let act = step.action();
         match step.snapshot(&h) {
             Ok(undo) => {
-                h.ok(&comp, Phase::Snapshot, act, undo.clone(), None, None)?;
-                undos.push((i, undo));
+                h.ok(&comp, Phase::Snapshot, act, undo, None, None)?;
             }
             Err(e) => {
                 h.record(
@@ -296,8 +291,6 @@ fn execute(
         h.ok(&comp, Phase::Commit, act, Undo::None, None, None)?;
     }
     h.ok(component, Phase::Commit, ACTION_COMMIT, Undo::None, None, None)?;
-    let _ = undos;
-    let _ = res;
     Ok(())
 }
 

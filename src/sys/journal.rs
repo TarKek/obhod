@@ -300,6 +300,37 @@ impl Journal {
     }
 }
 
+/// Records a one-shot action that has no separate rollback (deleting our own
+/// service, killing our own process).
+///
+/// Writes an `apply` record and a terminal `commit` record, so startup recovery
+/// never mistakes a finished action for an interrupted transaction.
+pub fn note_action(
+    journal: &Journal,
+    component: &str,
+    action: &str,
+    detail: serde_json::Value,
+    undo: Undo,
+) -> Result<()> {
+    let tx = journal.new_tx_id();
+    let make = |phase: Phase, action: String, undo: Undo| Record {
+        ts: crate::util::now_unix(),
+        seq: 0,
+        tx: tx.clone(),
+        component: component.to_string(),
+        phase,
+        action,
+        before: None,
+        after: Some(detail.clone()),
+        undo,
+        status: Status::Ok,
+        error: None,
+    };
+    journal.append(make(Phase::Apply, action.to_string(), undo))?;
+    journal.append(make(Phase::Commit, ACTION_COMMIT.to_string(), Undo::None))?;
+    Ok(())
+}
+
 /// Result of a startup recovery pass.
 #[derive(Debug, Default, Clone)]
 pub struct RecoveryReport {

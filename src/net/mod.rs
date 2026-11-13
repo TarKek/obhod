@@ -12,6 +12,10 @@
 //! Everything in this module is pure or reads files; no registry, no hosts,
 //! no DNS changes.
 
+// The manager/UI wiring lands separately; these types are the public API of
+// the network layer, so unused-by-bin warnings here are noise.
+#![allow(dead_code)]
+
 pub mod links;
 pub mod manager;
 pub mod proxy;
@@ -100,7 +104,7 @@ pub fn b64_decode_text(s: &str) -> Option<String> {
 /// Standard base64 with padding, for signatures and small binary blobs.
 pub fn b64_encode(bytes: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
             chunk[0],
@@ -163,7 +167,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
         }
     }
     let _ = fs::remove_file(&tmp);
-    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "rename failed")))
+    Err(last.unwrap_or_else(|| io::Error::other("rename failed")))
 }
 
 /// Short non-cryptographic but unpredictable-looking identifier: first 16 hex

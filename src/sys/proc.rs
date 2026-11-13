@@ -446,4 +446,17 @@ mod tests {
         assert!(!valid_image(""));
         assert!(!valid_image("winws exe"));
     }
+
+    /// Read-only check of the real CIM listing:
+    /// `cargo test --release -- --ignored --nocapture system_procs_lists_processes`
+    #[test]
+    #[ignore = "read-only check against the real machine"]
+    fn system_procs_lists_processes() {
+        // explorer.exe exists on every interactive Windows session.
+        let list = SystemProcs.list("explorer.exe").expect("CIM listing");
+        println!("explorer.exe processes: {}", list.len());
+        for p in &list {
+            println!("  pid {} -> {}", p.pid, p.exe);
+        }
+    }
 }

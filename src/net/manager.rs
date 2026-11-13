@@ -183,6 +183,11 @@ impl Node {
         if self.tls_verified {
             score += 10;
         }
+        if let Some(ok) = self.last_ok {
+            if now.saturating_sub(ok) < 3600 {
+                score += 20;
+            }
+        }
         score
     }
 
@@ -568,34 +573,33 @@ impl NodeStore {
     /// Applies a failover decision. Traffic is not touched: this only moves
     /// the `active`/`previous` pointers in the store.
     pub fn apply_decision(&mut self, decision: &FailoverDecision, now: u64) {
-        match decision {
-            FailoverDecision::Switch { to, .. } => {
-                if self.active.as_deref() == Some(to.as_str()) {
-                    return;
+        if let FailoverDecision::Switch { to, .. } = decision {
+            if self.active.as_deref() == Some(to.as_str()) {
+                return;
+            }
+            let old = self.active.clone();
+            if let Some(old_id) = old {
+                let was_working = self
+                    .get(&old_id)
+                    .map(|n| n.last_ok.is_some())
+                    .unwrap_or(false);
+                if was_working {
+                    self.previous = Some(old_id);
                 }
-                let old = self.active.clone();
-                if let Some(old_id) = old {
-                    let was_working = self
-                        .get(&old_id)
-                        .map(|n| n.last_ok.is_some())
-                        .unwrap_or(false);
-                    if was_working {
-                        self.previous = Some(old_id);
-                    }
-                }
-                self.active = Some(to.clone());
+            }
+            self.active = Some(to.clone());
+            self.active_since = now;
+            self.last_switch = Some(now);
+            return;
+        }
+        if let FailoverDecision::Keep {
+            node: Some(id), ..
+        } = decision
+        {
+            if self.active.is_none() {
+                self.active = Some(id.clone());
                 self.active_since = now;
-                self.last_switch = Some(now);
             }
-            FailoverDecision::Keep {
-                node: Some(id), ..
-            } => {
-                if self.active.is_none() {
-                    self.active = Some(id.clone());
-                    self.active_since = now;
-                }
-            }
-            _ => {}
         }
     }
 
@@ -769,7 +773,6 @@ pub fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::links::Protocol;
 
     fn link(host: &str, port: u16, uuid: &str) -> String {
         format!("vless://{uuid}@{host}:{port}?security=tls&sni={host}#{host}")
@@ -958,11 +961,13 @@ mod tests {
         assert_eq!(d.target(), Some(id_b.as_str()));
         assert_eq!(s.active.as_deref(), Some(id_b.as_str()));
         assert_eq!(s.previous.as_deref(), Some(id_a.as_str()));
-        // Failed node is cooling down and excluded from candidates.
+        // Failed node is cooling down and excluded from candidates while the
+        // cooldown is active.
         let node_a = s.get(&id_a).unwrap();
-        assert!(node_a.is_cooling(3200));
+        assert!(node_a.is_cooling(3100));
+        assert!(!node_a.is_cooling(3200));
         let f = Filter::default();
-        assert!(!f.matches(node_a, 3200));
+        assert!(!f.matches(node_a, 3100));
     }
 
     #[test]
@@ -977,10 +982,10 @@ mod tests {
         }
         s.active = Some(id_b.clone());
         s.active_since = 1000;
-        s.last_switch = Some(2000);
+        s.last_switch = Some(2200);
         s.record_check(&id_b, fail(2100), &policy);
         s.record_check(&id_b, fail(2200), &policy);
-        // Only 200 s? No: 60 s cooldown, so 2200 is still inside it.
+        // 2200 + 60 s: 2250 is still inside the anti-flap window.
         let d = decide(&s, &policy, &Filter::default(), 2250);
         assert!(matches!(d, FailoverDecision::Keep { .. }), "{d:?}");
         assert!(d.reason().contains("гистерезис"));
@@ -1076,7 +1081,7 @@ mod tests {
         s.active = Some(id.clone());
         s.save(&path).unwrap();
 
-        let (mut back, outcome) = NodeStore::load(&path);
+        let (back, outcome) = NodeStore::load(&path);
         assert_eq!(outcome, LoadOutcome::Loaded);
         assert_eq!(back.nodes.len(), 3);
         assert_eq!(back.active.as_deref(), Some(id.as_str()));

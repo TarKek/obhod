@@ -2,8 +2,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::app::{
-    comp_rows, friendly_stage, simple_summary, tr, AdvItem, App, HomeItem, Screen, SetItem,
-    StepKind,
+    comp_rows, friendly_stage, node_title, simple_summary, tr, AdvItem, App, HomeItem, Screen,
+    SetItem, StepKind,
 };
 use crate::brand;
 use crate::worker::UpdateMode;
@@ -37,6 +37,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::ProfilePlan => draw_profile_plan(f, chunks[1], app),
         Screen::ProfileEdit => draw_profile_edit(f, chunks[1], app),
         Screen::History => draw_history(f, chunks[1], app),
+        Screen::Proxies => draw_proxies(f, chunks[1], app),
     }
 
     draw_footer(f, chunks[2], app);
@@ -170,6 +171,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             "↑/↓ row · ←/→ or Space change · Enter save · Esc cancel",
         ),
         Screen::History => tr(lang, "Esc — назад", "Esc back"),
+        Screen::Proxies => tr(
+            lang,
+            "↑/↓ · Enter основной · f избранное · b резерв · o подобрать · r сортировка · Esc назад",
+            "↑/↓ · Enter primary · f favorite · b backup · o auto-pick · r sort · Esc back",
+        ),
     };
     f.render_widget(
         Paragraph::new(hints)
@@ -1044,6 +1050,83 @@ fn draw_profile_edit(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(List::new(items).block(block(&title)), area, &mut state);
 }
 
+fn draw_proxies(f: &mut Frame, area: Rect, app: &App) {
+    let lang = app.cfg.lang.as_str();
+    let now = crate::state::now_secs();
+    let nodes = app
+        .proxies
+        .ranked(app.proxy_rank, &crate::net::manager::Filter::default(), now);
+    let active = app
+        .proxies
+        .active
+        .as_ref()
+        .and_then(|id| app.proxies.get(id))
+        .map(node_title)
+        .unwrap_or_else(|| tr(lang, "не выбран", "not selected").to_string());
+    let mut items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!(" {} ", tr(lang, "Основной:", "Primary:")),
+                Style::default().fg(brand::muted()),
+            ),
+            Span::styled(active, Style::default().fg(brand::ok()).bold()),
+        ])),
+        ListItem::new(Line::from(Span::styled(
+            format!(
+                " {}: {}",
+                tr(lang, "Сортировка", "Sorting"),
+                app.proxy_rank.ru()
+            ),
+            Style::default().fg(brand::muted()),
+        ))),
+        ListItem::new(Line::from("")),
+    ];
+    if nodes.is_empty() {
+        items.push(ListItem::new(Span::styled(
+            format!(
+                "  {}",
+                tr(
+                    lang,
+                    "Пока пусто: обновите подписку, узлы появятся здесь.",
+                    "Empty for now: update the subscription to collect nodes.",
+                )
+            ),
+            Style::default().fg(brand::warn()),
+        )));
+    }
+    let names: Vec<String> = nodes.iter().map(|n| node_title(n)).collect();
+    let col = menu_col(names.iter().map(String::as_str));
+    for (i, n) in nodes.iter().enumerate() {
+        let mut tags = vec![match n.role {
+            crate::net::manager::Role::Primary => tr(lang, "основной", "primary"),
+            crate::net::manager::Role::Backup => tr(lang, "резерв", "backup"),
+        }];
+        if n.favorite {
+            tags.push("★");
+        }
+        if n.consecutive_failures() > 0 {
+            tags.push(tr(lang, "сбои", "fails"));
+        }
+        let rate = (n.success_rate(10) * 100.0).round() as i64;
+        let desc = format!("{} · {}%", tags.join(" · "), rate);
+        items.push(menu_row(&names[i], &desc, i == app.proxy_idx, inner_width(area), col));
+    }
+    if let Some(msg) = &app.proxy_msg {
+        items.push(ListItem::new(Line::from("")));
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  {msg}"),
+            Style::default().fg(brand::warn()),
+        ))));
+    }
+    let mut state = ListState::default();
+    state.select(Some(app.proxy_idx.min(nodes.len().saturating_sub(1))));
+    f.render_stateful_widget(
+        List::new(items).block(block(tr(lang, "Серверы", "Servers"))),
+        area,
+        &mut state,
+    );
+}
+
 fn draw_history(f: &mut Frame, area: Rect, app: &App) {
     let lang = app.cfg.lang.as_str();
     let mut lines: Vec<Line> = vec![Line::from("")];
@@ -1089,6 +1172,10 @@ fn draw_advanced(f: &mut Frame, area: Rect, app: &App) {
             AdvItem::Components => (
                 tr(lang, "Компоненты", "Components"),
                 tr(lang, "что включать", "what to turn on"),
+            ),
+            AdvItem::Proxies => (
+                tr(lang, "Серверы", "Servers"),
+                tr(lang, "узлы, задержка, избранное, переключение", "nodes, latency, favorites, failover"),
             ),
             AdvItem::History => (
                 tr(lang, "История", "History"),

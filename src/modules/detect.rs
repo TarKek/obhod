@@ -51,14 +51,7 @@ pub fn scan() -> Vec<Found> {
     }
 
     // --- Telegram (informational only) -----------------------------------
-    let tg = [
-        PathBuf::from(r"E:\fromdiskD\vaznuye_faily_ne_ydalat\Ayugram\AyuGram.exe"),
-        dir_appdata().join("Telegram Desktop").join("Telegram.exe"),
-        PathBuf::from(r"C:\Program Files\Telegram Desktop\Telegram.exe"),
-    ]
-    .into_iter()
-    .find(|p| p.exists());
-    if let Some(p) = tg {
+    if let Some(p) = telegram_path() {
         out.push(Found {
             key: "telegram",
             ru: "Telegram".into(),
@@ -69,6 +62,66 @@ pub fn scan() -> Vec<Found> {
     }
 
     out
+}
+
+/// Finds Telegram without hard-coded personal paths: registry first (App Paths
+/// and the `tg://` protocol handler), then the usual install locations.
+pub fn telegram_path() -> Option<PathBuf> {
+    if let Some(p) = app_path("Telegram.exe") {
+        return Some(p);
+    }
+    if let Some(p) = protocol_handler_exe("tg") {
+        return Some(p);
+    }
+    first_existing(&[
+        dir_local_appdata()
+            .join("Telegram Desktop")
+            .join("Telegram.exe"),
+        dir_appdata().join("Telegram Desktop").join("Telegram.exe"),
+        dir_local_appdata()
+            .join("Programs")
+            .join("Telegram Desktop")
+            .join("Telegram.exe"),
+        PathBuf::from(r"C:\Program Files\Telegram Desktop\Telegram.exe"),
+        PathBuf::from(r"C:\Program Files (x86)\Telegram Desktop\Telegram.exe"),
+    ])
+}
+
+/// Path from `…\CurrentVersion\App Paths\<exe>` (HKLM, then HKCU).
+fn app_path(exe: &str) -> Option<PathBuf> {
+    let key = format!(
+        r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
+    );
+    for root in ["HKLM:", "HKCU:"] {
+        let ps = format!(
+            "$ErrorActionPreference='SilentlyContinue'; (Get-ItemProperty '{root}\\{key}').'(default)'"
+        );
+        let s = util::hidden_str(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &ps],
+        )
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+        let p = PathBuf::from(s.trim_matches('"'));
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Resolves `HKCU\Software\Classes\<scheme>\shell\open\command` to an exe.
+fn protocol_handler_exe(scheme: &str) -> Option<PathBuf> {
+    let ps = format!(
+        "$ErrorActionPreference='SilentlyContinue'; (Get-ItemProperty 'HKCU:\\Software\\Classes\\{scheme}\\shell\\open\\command').'(default)'"
+    );
+    let s = util::hidden_str(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &ps],
+    )
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .unwrap_or_default();
+    parse_service_image(&s).filter(|p| p.is_file())
 }
 
 /// A program we found on this machine, wherever the user installed it.
@@ -84,22 +137,92 @@ struct RegApp {
     name: String,
     version: Option<String>,
     location: Option<PathBuf>,
+    /// `DisplayIcon` or App Paths default value: often the exe itself.
+    icon: Option<PathBuf>,
 }
+
+/// Word-aware name match: `Happ` must not match `Happy` or `WhatsApp`, while
+/// CamelCase products such as `TgWsProxy` still match `tgws`.
+fn name_matches(name: &str, needle: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    for token in name.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token.eq_ignore_ascii_case(needle) {
+            return true;
+        }
+        // CamelCase concatenation: "TgWsProxy" starts with "TgWs" and the next
+        // character is uppercase; "Happy" must not match "happ".
+        if token.len() > needle.len()
+            && token.is_char_boundary(needle.len())
+            && token[..needle.len()].eq_ignore_ascii_case(needle)
+            && token[needle.len()..]
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_uppercase())
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn icon_path(raw: &str) -> Option<PathBuf> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let s = if s.starts_with('"') {
+        s.trim_start_matches('"').split('"').next().unwrap_or("")
+    } else {
+        s.split(',').next().unwrap_or(s)
+    };
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
+    }
+}
+
+/// Uses a DisplayIcon/App Paths value as an executable hint.
+fn exe_near(icon: &Path, exe: &str) -> Option<PathBuf> {
+    if icon
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.eq_ignore_ascii_case(exe))
+        .unwrap_or(false)
+        && icon.is_file()
+    {
+        return Some(icon.to_path_buf());
+    }
+    find_exe_in(icon.parent().unwrap_or(icon), exe, 2)
+}
+
+/// One entry while `installed()` is collecting data.
+type RawApp = (&'static str, String, Option<PathBuf>, Option<String>, bool);
 
 /// Finds zapret, TgWsProxy, Hiddify, v2rayN and Happ in the registry,
 /// in the services database and in common portable locations.
 pub fn installed() -> Vec<Installed> {
     let regs = reg_apps();
-    let mut raw: Vec<(&'static str, String, Option<PathBuf>, Option<String>, bool)> = Vec::new();
+    let mut raw: Vec<RawApp> = Vec::new();
 
     // --- zapret -----------------------------------------------------------
+    let zapret_reg = regs.iter().find(|r| name_matches(&r.name, "zapret"));
     let mut zpath = service_image("zapret");
     if zpath.is_none() {
-        if let Some(r) = regs.iter().find(|r| r.name.to_lowercase().contains("zapret")) {
+        if let Some(r) = zapret_reg {
             zpath = r
                 .location
                 .as_deref()
-                .and_then(|d| find_exe_in(d, "winws.exe", 4));
+                .and_then(|d| find_exe_in(d, "winws.exe", 4))
+                .or_else(|| r.icon.as_deref().and_then(|p| exe_near(p, "winws.exe")));
         }
     }
     if zpath.is_none() {
@@ -118,7 +241,7 @@ pub fn installed() -> Vec<Installed> {
         ]);
     }
     let zrun = proc_running("winws.exe");
-    if service_exists("zapret") || zrun || zpath.is_some() {
+    if service_exists("zapret") || zrun || zpath.is_some() || zapret_reg.is_some() {
         let ver = zpath.as_deref().and_then(zapret_version);
         raw.push(("zapret", "zapret".into(), zpath, ver, zrun));
     }
@@ -166,10 +289,11 @@ pub fn installed() -> Vec<Installed> {
         ),
     ];
     for (key, disp, matcher, exe, dirs) in client_defs {
-        let reg = regs.iter().find(|r| r.name.to_lowercase().contains(matcher));
+        let reg = regs.iter().find(|r| name_matches(&r.name, matcher));
         let mut path = reg
             .and_then(|r| r.location.as_deref())
-            .and_then(|d| find_exe_in(d, exe, 5));
+            .and_then(|d| find_exe_in(d, exe, 5))
+            .or_else(|| reg.and_then(|r| r.icon.as_deref()).and_then(|p| exe_near(p, exe)));
         if path.is_none() {
             for d in &dirs {
                 if let Some(p) = find_exe_in(d, exe, 4) {
@@ -333,7 +457,13 @@ pub fn file_versions(paths: &[PathBuf]) -> Vec<Option<String>> {
 }
 
 fn reg_apps() -> Vec<RegApp> {
-    let ps = r#"$ErrorActionPreference='SilentlyContinue'; $k=@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'); Get-ItemProperty $k | Where-Object { $_.DisplayName -match 'Happ|zapret|TgWsProxy|Hiddify|v2rayN' } | ForEach-Object { @($_.DisplayName,$_.DisplayVersion,$_.InstallLocation) -join '|' }"#;
+    // One PowerShell call: installed programs (Uninstall keys, 32/64-bit and
+    // per-user) plus App Paths entries. `\bhapp\b` avoids Happy/WhatsApp.
+    let ps = r#"$ErrorActionPreference='SilentlyContinue';
+$keys=@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*');
+Get-ItemProperty $keys | Where-Object { $_.DisplayName -match 'zapret|tgws|hiddify|v2rayn|\bhapp\b' } | ForEach-Object { 'U|' + (@($_.DisplayName,$_.DisplayVersion,$_.InstallLocation,$_.DisplayIcon) -join '|') };
+$ap=@('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\*','HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\*');
+Get-ItemProperty $ap | Where-Object { $_.PSChildName -match 'zapret|tgws|hiddify|v2rayn|happ|telegram' } | ForEach-Object { 'A|' + $_.PSChildName + '|' + $_.'(default)' }"#;
     let text = util::hidden_str(
         "powershell",
         &["-NoProfile", "-NonInteractive", "-Command", ps],
@@ -346,18 +476,47 @@ fn reg_apps() -> Vec<RegApp> {
         if line.is_empty() {
             continue;
         }
-        let mut it = line.splitn(3, '|');
-        let name = it.next().unwrap_or("").trim().to_string();
-        if name.is_empty() {
-            continue;
+        if let Some(rest) = line.strip_prefix("U|") {
+            let mut it = rest.splitn(4, '|');
+            let name = it.next().unwrap_or("").trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let version = it
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let loc = it
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from);
+            let icon = it.next().and_then(icon_path);
+            out.push(RegApp {
+                name,
+                version,
+                location: loc,
+                icon,
+            });
+        } else if let Some(rest) = line.strip_prefix("A|") {
+            let mut it = rest.splitn(2, '|');
+            let name = it.next().unwrap_or("").trim().to_string();
+            let path = it.next().map(str::trim).unwrap_or("");
+            if name.is_empty() || path.is_empty() {
+                continue;
+            }
+            let p = PathBuf::from(path.trim_matches('"'));
+            if !p.is_file() {
+                continue;
+            }
+            out.push(RegApp {
+                name,
+                version: None,
+                location: p.parent().map(Path::to_path_buf),
+                icon: Some(p),
+            });
         }
-        let version = it.next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-        let loc = it.next().map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from);
-        out.push(RegApp {
-            name,
-            version,
-            location: loc,
-        });
     }
     out
 }
@@ -375,13 +534,28 @@ pub fn service_image(name: &str) -> Option<PathBuf> {
     )
     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     .unwrap_or_default();
+    parse_service_image(&s).filter(|p| p.is_file())
+}
+
+/// Extracts the executable from an `ImagePath`/command line, handling quotes,
+/// `\??\` prefixes and trailing arguments.
+pub fn parse_service_image(raw: &str) -> Option<PathBuf> {
+    let s = raw.trim();
     if s.is_empty() {
         return None;
     }
-    let lower = s.to_lowercase();
+    let lower = s.to_ascii_lowercase();
     let end = lower.find(".exe")? + 4;
-    let p = s[..end].trim().trim_matches('"').trim_start_matches(r"\??\");
-    Some(PathBuf::from(p))
+    let p = s[..end]
+        .trim()
+        .trim_matches('"')
+        .trim_start_matches(r"\??\")
+        .trim();
+    if p.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(p))
+    }
 }
 
 pub fn keep_flag(items: &[Found], key: &str) -> bool {
@@ -415,9 +589,15 @@ pub fn dir_local_appdata() -> PathBuf {
 }
 
 pub fn service_exists(name: &str) -> bool {
-    // Locale-independent: a missing service produces no stdout at all.
+    // `sc query <missing>` prints nothing to stdout; the key name SERVICE_NAME
+    // is not localized, so this works on any Windows language.
     util::hidden_str("sc", &["query", name])
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .to_ascii_uppercase()
+                    .contains("SERVICE_NAME")
+        })
         .unwrap_or(false)
 }
 
@@ -470,4 +650,78 @@ pub fn find_file(dirs: &[PathBuf], prefix: &str, ext: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_matching_avoids_whatsapp_happy_false_positives() {
+        assert!(name_matches("Happ", "happ"));
+        assert!(name_matches("Happ-proxy desktop", "happ"));
+        assert!(name_matches("zapret-discord-youtube", "zapret"));
+        assert!(name_matches("Hiddify Next", "hiddify"));
+        assert!(name_matches("v2rayN", "v2rayn"));
+        assert!(name_matches("TgWsProxy", "tgws"));
+
+        assert!(!name_matches("WhatsApp", "happ"));
+        assert!(!name_matches("Happy Tools", "happ"));
+        assert!(!name_matches("Happening", "happ"));
+        assert!(!name_matches("Random app", "zapret"));
+        assert!(!name_matches("", "happ"));
+    }
+
+    #[test]
+    fn display_icon_paths_are_parsed() {
+        assert_eq!(
+            icon_path(r#""C:\Program Files\Happ\Happ.exe",0"#),
+            Some(PathBuf::from(r"C:\Program Files\Happ\Happ.exe"))
+        );
+        assert_eq!(
+            icon_path(r"C:\Apps\v2rayN\v2rayN.exe,0"),
+            Some(PathBuf::from(r"C:\Apps\v2rayN\v2rayN.exe"))
+        );
+        assert_eq!(icon_path("   "), None);
+    }
+
+    #[test]
+    fn service_image_parsing_handles_quotes_and_args() {
+        assert_eq!(
+            parse_service_image(r#""C:\zapret\bin\winws.exe" --wf-tcp=80,443"#),
+            Some(PathBuf::from(r"C:\zapret\bin\winws.exe"))
+        );
+        assert_eq!(
+            parse_service_image(r"\??\C:\zapret\bin\winws.exe --arg"),
+            Some(PathBuf::from(r"C:\zapret\bin\winws.exe"))
+        );
+        assert_eq!(
+            parse_service_image(r"C:\Program Files\zapret\winws.EXE"),
+            Some(PathBuf::from(r"C:\Program Files\zapret\winws.EXE"))
+        );
+        assert_eq!(parse_service_image(""), None);
+        assert_eq!(parse_service_image("no program here"), None);
+    }
+
+    #[test]
+    fn exe_near_uses_the_icon_or_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("Happ.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        assert_eq!(exe_near(&exe, "Happ.exe").as_deref(), Some(exe.as_path()));
+        // Icon is a .ico in the same folder as the exe.
+        let ico = dir.path().join("app.ico");
+        std::fs::write(&ico, b"ico").unwrap();
+        assert_eq!(exe_near(&ico, "Happ.exe").as_deref(), Some(exe.as_path()));
+        assert_eq!(exe_near(&ico, "Missing.exe"), None);
+    }
+
+    #[test]
+    fn registry_and_service_helpers_do_not_panic() {
+        // These read the real machine but must never panic and must agree on
+        // a service that certainly does not exist.
+        let _ = service_exists("obhod-definitely-not-a-service");
+        assert!(!service_exists("obhod-definitely-not-a-service"));
+        let _ = proc_running("obhod-not-running.exe");
+    }
 }

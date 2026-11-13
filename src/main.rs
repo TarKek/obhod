@@ -184,6 +184,7 @@ fn demo_static(mode: app::Mode) {
         ("SETTINGS", app::Screen::Settings),
         ("ADVANCED", app::Screen::Advanced),
         ("PROFILES", app::Screen::Profiles),
+        ("PROXIES", app::Screen::Proxies),
         ("PROFILE_PLAN", app::Screen::ProfilePlan),
         ("PROFILE_EDIT", app::Screen::ProfileEdit),
         ("HISTORY", app::Screen::History),
