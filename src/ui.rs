@@ -319,7 +319,7 @@ fn draw_home(f: &mut Frame, area: Rect, app: &App) {
             ),
             HomeItem::Settings => (
                 tr(lang, "Настройки", "Settings"),
-                tr(lang, "язык, папка данных, автообновление", "language, data folder, updates"),
+                tr(lang, "язык, папка данных, напоминания", "language, data folder, reminders"),
             ),
             HomeItem::Exit => (tr(lang, "Выход", "Exit"), ""),
         })
@@ -363,11 +363,18 @@ fn draw_prelude(f: &mut Frame, area: Rect, app: &App) {
     for (i, fnd) in app.found.iter().enumerate() {
         let selected = i == app.prelude_idx;
         items.push(menu_row(names[i], &fnd.detail, selected, width, col));
-        items.push(ListItem::new(choice_line(
-            &[(keep, fnd.keep), (again, !fnd.keep)],
-            selected,
-            width,
-        )));
+        if fnd.key == "telegram" {
+            items.push(ListItem::new(Line::from(Span::styled(
+                tr(lang, "     только информация", "     informational only"),
+                Style::default().fg(brand::muted()),
+            ))));
+        } else {
+            items.push(ListItem::new(choice_line(
+                &[(keep, fnd.keep), (again, !fnd.keep)],
+                selected,
+                width,
+            )));
+        }
         items.push(ListItem::new(Line::from("")));
     }
 
@@ -1088,7 +1095,7 @@ fn draw_settings(f: &mut Frame, area: Rect, app: &App) {
                 if app.cfg.lang == "ru" { "Русский" } else { "English" }.to_string(),
             ),
             SetItem::Autoupdate => (
-                tr(lang, "Автообновление", "Auto-update"),
+                tr(lang, "Напоминать об обновлениях", "Update reminder"),
                 match app.cfg.autoupdate_days {
                     0 => tr(lang, "выкл", "off").to_string(),
                     1 => tr(lang, "1 день", "1 day").to_string(),

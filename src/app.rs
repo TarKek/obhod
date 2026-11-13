@@ -376,7 +376,10 @@ impl App {
                 }
                 K::Char(' ') | K::Left | K::Right => {
                     if let Some(f) = self.found.get_mut(self.prelude_idx) {
-                        f.keep = !f.keep;
+                        // Telegram is informational: there is nothing to keep or redo.
+                        if f.key != "telegram" {
+                            f.keep = !f.keep;
+                        }
                     }
                 }
                 K::Enter | K::Esc => {

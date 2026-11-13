@@ -30,13 +30,46 @@ pub fn run() -> Vec<CheckItem> {
         .build()
         .ok();
 
+    // Probes are independent: run them in parallel, so a blocked site costs
+    // one timeout instead of three in a row.
+    let yt = {
+        let c = client.clone();
+        std::thread::spawn(move || {
+            probe_http(c.as_ref(), "https://www.youtube.com/generate_204", &[204, 200])
+        })
+    };
+    let dc = {
+        let c = client.clone();
+        std::thread::spawn(move || {
+            probe_http(c.as_ref(), "https://discord.com/api/v9/gateway", &[200])
+        })
+    };
+    let tg = {
+        let c = client.clone();
+        std::thread::spawn(move || {
+            probe_http(c.as_ref(), "https://api.telegram.org/", &[200, 404, 302])
+        })
+    };
+    let dns = std::thread::spawn(|| {
+        ("youtube.com", 443)
+            .to_socket_addrs()
+            .map(|mut a| a.next().is_some())
+            .unwrap_or(false)
+    });
+    let zapret = std::thread::spawn(|| {
+        util::hidden_str("tasklist", &["/FI", "IMAGENAME eq winws.exe"])
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("winws.exe"))
+            .unwrap_or(false)
+    });
+
+    let youtube = yt.join().unwrap_or(false);
+    let discord = dc.join().unwrap_or(false);
+    let tg = tg.join().unwrap_or(false);
+    let dns = dns.join().unwrap_or(false);
+    let zapret = zapret.join().unwrap_or(false);
+
     let mut items = Vec::new();
 
-    let youtube = probe_http(
-        client.as_ref(),
-        "https://www.youtube.com/generate_204",
-        &[204, 200],
-    );
     items.push(CheckItem {
         ru: "YouTube".into(),
         en: "YouTube".into(),
@@ -53,11 +86,6 @@ pub fn run() -> Vec<CheckItem> {
         },
     });
 
-    let discord = probe_http(
-        client.as_ref(),
-        "https://discord.com/api/v9/gateway",
-        &[200],
-    );
     items.push(CheckItem {
         ru: "Discord".into(),
         en: "Discord".into(),
@@ -74,7 +102,6 @@ pub fn run() -> Vec<CheckItem> {
         },
     });
 
-    let tg = probe_http(client.as_ref(), "https://api.telegram.org/", &[200, 404, 302]);
     items.push(CheckItem {
         ru: "Telegram".into(),
         en: "Telegram".into(),
@@ -91,10 +118,6 @@ pub fn run() -> Vec<CheckItem> {
         },
     });
 
-    let dns = ("youtube.com", 443)
-        .to_socket_addrs()
-        .map(|mut a| a.next().is_some())
-        .unwrap_or(false);
     items.push(CheckItem {
         ru: "Интернет и DNS".into(),
         en: "Internet and DNS".into(),
@@ -111,9 +134,6 @@ pub fn run() -> Vec<CheckItem> {
         },
     });
 
-    let zapret = util::hidden_str("tasklist", &["/FI", "IMAGENAME eq winws.exe"])
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("winws.exe"))
-        .unwrap_or(false);
     items.push(CheckItem {
         ru: "Обход для YouTube/Discord".into(),
         en: "YouTube/Discord bypass".into(),

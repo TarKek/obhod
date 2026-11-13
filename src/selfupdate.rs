@@ -60,7 +60,11 @@ fn latest_release() -> Result<Option<Release>> {
         return Ok(None);
     }
     if !resp.status().is_success() {
-        bail!("GitHub API {}", resp.status());
+        crate::logger::info(format!(
+            "self-update: GitHub API {}, пробую страницу релизов",
+            resp.status()
+        ));
+        return fallback_release(&client);
     }
     let json: serde_json::Value = resp.json()?;
     let tag = json["tag_name"]
@@ -83,6 +87,17 @@ fn latest_release() -> Result<Option<Release>> {
         .to_string();
     let size = asset["size"].as_u64().unwrap_or(0);
     Ok(Some(Release { tag, url, size }))
+}
+
+/// Used when the API is rate-limited or blocked: the releases page still
+/// redirects to the latest tag, and assets follow a predictable URL.
+fn fallback_release(client: &reqwest::blocking::Client) -> Result<Option<Release>> {
+    let tag = crate::util::github_latest_tag(client, REPO)?;
+    Ok(Some(Release {
+        url: format!("https://github.com/{REPO}/releases/download/{tag}/{ASSET}"),
+        tag,
+        size: 0,
+    }))
 }
 
 /// Checks for a newer release. Returns `Ok(Some(tag))` when one exists.
@@ -130,6 +145,11 @@ pub fn check_and_apply(args: &[String]) -> Result<bool> {
     if rel.size > 0 && got != rel.size {
         let _ = fs::remove_file(&new);
         bail!("скачанный файл повреждён ({got} из {} байт)", rel.size);
+    }
+    let head = fs::read(&new).unwrap_or_default();
+    if head.len() < 2 || &head[..2] != b"MZ" {
+        let _ = fs::remove_file(&new);
+        bail!("скачанный файл не является программой Windows");
     }
 
     fs::rename(&exe, &old).context("не удалось переименовать текущий exe")?;
