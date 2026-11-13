@@ -8,7 +8,9 @@ TgWsProxy, hosts, VLESS-подписки, DNS/DoH. Один `.exe`, без ус�
 - Rust 2021, Windows-only (Win32 API через `extern "system"`), `ratatui 0.29` + `crossterm 0.28`.
 - `cargo build --release` → `target\release\obhod.exe`; `.\build.ps1` копирует в `dist\obhod.exe`.
 - `cargo build` пишет в stderr: в PS 5.1 с `$ErrorActionPreference='Stop'` это ломает скрипт — в `build.ps1` EAP на время сборки понижается.
-- Зависимости только: ratatui, crossterm, reqwest(rustls, blocking), serde/serde_json, zip, anyhow. Новые не добавлять без причины (важна портативность и размер).
+- Зависимости: ratatui, crossterm, reqwest(rustls, blocking), serde/serde_json, zip,
+  anyhow, sha2, ed25519-dalek (проверка подписей), tempfile (только dev). Новые не
+  добавлять без причины (важна портативность и размер).
 
 ## Карта кода
 
@@ -24,6 +26,9 @@ TgWsProxy, hosts, VLESS-подписки, DNS/DoH. Один `.exe`, без ус�
 | `src/state.rs`, `logger.rs` | версии/даты, лог `data\obhod.log` |
 | `src/selfupdate.rs` | автообновление exe из GitHub Releases (`TarKek/obhod`) |
 | `src/modules/*` | по одному модулю на компонент; `mod.rs::run_all` — порядок запуска; `off.rs` — выключение/откат |
+| `src/core/*` | ядро: `state` (фазы компонентов), `health` (этапы DNS→TLS→протокол→сайт), `profiles`, `history`, `background` |
+| `src/net/*` | сеть: разбор ссылок, TCP/TLS/протокол-пробы, менеджер узлов и failover, подписи обновлений |
+| `src/sys/*` | Windows-слой: DNS-снимки, hosts, транзакции, журнал восстановления, владение процессами |
 
 ## Инварианты и правила
 
@@ -55,6 +60,16 @@ TgWsProxy, hosts, VLESS-подписки, DNS/DoH. Один `.exe`, без ус�
 - **Портативность**: ничего вне папки exe, кроме службы/автозагрузки (реестр
   `HKCU\...\Run`) — и только по явному согласию пользователя.
 - **Ничего не перезаписывать** без согласия: `detect::scan` → экран Prelude.
+- **Статус — из проверок, а не из файлов**: `core::state::Phase` обновляется
+  `apply_checks_to_core` по результатам `check`/`net`; UI читает
+  `app.core.overall()` и чипы, а не собственную догадку. Открытый TCP-порт без
+  подтверждённого протокола — не «работает».
+- **Профили**: импорт/экспорт — `core::profiles`; перед применением всегда
+  показывать `plan()` (экран ProfilePlan). Импортированный профиль не меняет
+  систему сам по себе. Встроенные профили только для чтения, правка создаёт копию.
+- **Windows-изменения — через `sys::transaction`/`sys::journal`**: снимок →
+  prepare → apply → verify → commit, восстановление при старте через
+  `sys::recover_pending_quiet`. Ошибка чтения hosts останавливает запись.
 - **Windows-команды** запускать через `util::hidden*` с `CREATE_NO_WINDOW`, иначе
   мигают консольные окна.
 - **Открытие URL/URI** — только `util::open_url` (ShellExecuteW). `cmd /c start`

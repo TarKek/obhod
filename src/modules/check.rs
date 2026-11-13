@@ -1,6 +1,17 @@
-use std::net::ToSocketAddrs;
-use std::time::Duration;
+//! Quick "does it work?" screen.
+//!
+//! Each row distinguishes what was actually observed:
+//! - HTTP probes for YouTube/Discord/Telegram;
+//! - DNS resolution;
+//! - the local bypass process;
+//! - the prepared Telegram proxy list (TCP only, protocol **not** verified);
+//! - the prepared VPN node list (checked when it was fetched, not now).
 
+use std::net::ToSocketAddrs;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use crate::modules::telegram;
 use crate::util;
 
 pub struct CheckItem {
@@ -24,8 +35,16 @@ impl Clone for CheckItem {
 }
 
 pub fn run() -> Vec<CheckItem> {
+    let data = crate::config::Config::load().data_dir();
+    run_with_data(&data)
+}
+
+/// Same checks, but with an explicit data directory (used by tests/tools).
+pub fn run_with_data(data: &Path) -> Vec<CheckItem> {
+    let data = data.to_path_buf();
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(8))
+        .connect_timeout(Duration::from_secs(4))
         .user_agent("obhod/0.1")
         .build()
         .ok();
@@ -150,6 +169,13 @@ pub fn run() -> Vec<CheckItem> {
         },
     });
 
+    if let Some(item) = mtproto_item(&data) {
+        items.push(item);
+    }
+    if let Some(item) = subs_item(&data) {
+        items.push(item);
+    }
+
     items
 }
 
@@ -190,7 +216,89 @@ pub fn demo() -> Vec<CheckItem> {
             detail_ru: "запущен (демо)".into(),
             detail_en: "running (demo)".into(),
         },
+        CheckItem {
+            ru: "Прокси Telegram".into(),
+            en: "Telegram proxy".into(),
+            ok: true,
+            detail_ru: "порт открыт у 2 из 3, протокол не проверен (демо)".into(),
+            detail_en: "port open for 2 of 3, protocol not verified (demo)".into(),
+        },
     ]
+}
+
+/// Probes the best few proxies from `mtproto.txt` (TCP only). Returns `None`
+/// when the list does not exist yet: an empty row would be noise.
+fn mtproto_item(data: &Path) -> Option<CheckItem> {
+    let text = std::fs::read_to_string(data.join("mtproto.txt")).ok()?;
+    let proxies: Vec<telegram::MtProxy> = text
+        .lines()
+        .filter_map(|l| {
+            let i = l.find("tg://proxy")?;
+            telegram::parse_link(&l[i..])
+        })
+        .take(3)
+        .collect();
+    if proxies.is_empty() {
+        return None;
+    }
+    let total = proxies.len();
+    let cfg = telegram::default_probe_config();
+    let handles: Vec<_> = proxies
+        .into_iter()
+        .map(|p| {
+            let cfg = cfg.clone();
+            std::thread::spawn(move || telegram::probe(&p.server, p.port, &p.secret, &cfg).tcp_ok)
+        })
+        .collect();
+    let open = handles
+        .into_iter()
+        .filter(|h| h.join().unwrap_or(false))
+        .count();
+    let ok = open > 0;
+    Some(CheckItem {
+        ru: "Прокси Telegram".into(),
+        en: "Telegram proxy".into(),
+        ok,
+        detail_ru: if ok {
+            format!("порт открыт у {open} из {total}, протокол не проверен")
+        } else {
+            "нет ответа по TCP — обновите список в «Обновить»".into()
+        },
+        detail_en: if ok {
+            format!("port open for {open} of {total}, protocol not verified")
+        } else {
+            "no TCP response - refresh the list via Update".into()
+        },
+    })
+}
+
+/// The node list is validated during the subscription update, not here, so
+/// this row only states how many nodes are ready.
+fn subs_item(data: &Path) -> Option<CheckItem> {
+    let path = data.join("subs_alive_plain.txt");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let n = text
+        .lines()
+        .filter(|l| {
+            let l = l.trim();
+            !l.is_empty() && !l.starts_with('#')
+        })
+        .count();
+    Some(CheckItem {
+        ru: "Серверы для VPN-клиента".into(),
+        en: "VPN client servers".into(),
+        ok: n > 0,
+        detail_ru: if n > 0 {
+            format!("{n} узлов готово (проверены при обновлении)")
+        } else {
+            "список пуст — обновите подписку".into()
+        },
+        detail_en: if n > 0 {
+            format!("{n} nodes ready (checked when fetched)")
+        } else {
+            "empty - refresh the subscription".into()
+        },
+    })
 }
 
 fn probe_http(
@@ -199,8 +307,56 @@ fn probe_http(
     ok_codes: &[u16],
 ) -> bool {
     let Some(c) = client else { return false };
-    match c.get(url).send() {
-        Ok(r) => ok_codes.contains(&r.status().as_u16()),
+    let started = Instant::now();
+    match c.get(url).timeout(Duration::from_secs(6)).send() {
+        Ok(r) => {
+            let _ = started.elapsed();
+            ok_codes.contains(&r.status().as_u16())
+        }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_list_files_produce_no_extra_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(mtproto_item(dir.path()).is_none());
+        assert!(subs_item(dir.path()).is_none());
+        std::fs::write(dir.path().join("mtproto.txt"), "# only comments\n").unwrap();
+        assert!(mtproto_item(dir.path()).is_none());
+    }
+
+    #[test]
+    fn empty_subscription_is_visible_as_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("subs_alive_plain.txt"), "# none\n\n").unwrap();
+        let item = subs_item(dir.path()).unwrap();
+        assert!(!item.ok);
+        assert!(item.detail_ru.contains("список пуст"));
+    }
+
+    #[test]
+    fn proxy_row_never_claims_the_protocol_is_verified() {
+        // Point at a closed local port: the row must fail without claiming
+        // anything about the protocol.
+        let dir = tempfile::tempdir().unwrap();
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        std::fs::write(
+            dir.path().join("mtproto.txt"),
+            format!(
+                "10 ms  tg://proxy?server=127.0.0.1&port={port}&secret=0123456789abcdef0123456789abcdef\n"
+            ),
+        )
+        .unwrap();
+        let item = mtproto_item(dir.path()).unwrap();
+        assert!(!item.ok);
+        assert!(!item.detail_ru.contains("работает"));
     }
 }

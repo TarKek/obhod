@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::app::{
-    comp_rows, friendly_stage, simple_summary, tr, AdvItem, App, Health, HomeItem, Screen, SetItem,
+    comp_rows, friendly_stage, simple_summary, tr, AdvItem, App, HomeItem, Screen, SetItem,
     StepKind,
 };
 use crate::brand;
@@ -33,6 +33,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Settings => draw_settings(f, chunks[1], app),
         Screen::Update => draw_update(f, chunks[1], app),
         Screen::Off => draw_off(f, chunks[1], app),
+        Screen::Profiles => draw_profiles(f, chunks[1], app),
+        Screen::ProfilePlan => draw_profile_plan(f, chunks[1], app),
+        Screen::ProfileEdit => draw_profile_edit(f, chunks[1], app),
+        Screen::History => draw_history(f, chunks[1], app),
     }
 
     draw_footer(f, chunks[2], app);
@@ -150,6 +154,22 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             "Enter — выключить и вернуть как было, Esc — отмена",
             "Enter to turn off and restore, Esc to cancel",
         ),
+        Screen::Profiles => tr(
+            lang,
+            "↑/↓ выбрать · Enter применить · n новый · e изменить · x экспорт · i импорт",
+            "↑/↓ select · Enter apply · n new · e edit · x export · i import",
+        ),
+        Screen::ProfilePlan => tr(
+            lang,
+            "Enter — применить показанные изменения, Esc — назад",
+            "Enter apply the shown changes, Esc back",
+        ),
+        Screen::ProfileEdit => tr(
+            lang,
+            "↑/↓ строка · ←/→ или Space изменить · Enter сохранить · Esc отмена",
+            "↑/↓ row · ←/→ or Space change · Enter save · Esc cancel",
+        ),
+        Screen::History => tr(lang, "Esc — назад", "Esc back"),
     };
     f.render_widget(
         Paragraph::new(hints)
@@ -262,10 +282,13 @@ fn draw_home(f: &mut Frame, area: Rect, app: &App) {
     let mut items: Vec<ListItem> = Vec::new();
 
     // What is on right now, in one line.
-    let (mark, color) = match app.health() {
-        Health::On => ("✓", brand::ok()),
-        Health::Partial => ("•", brand::warn()),
-        Health::Off => ("○", brand::secondary()),
+    let phase = app.core.overall();
+    let (mark, color) = match phase {
+        crate::core::Phase::Operational => ("✓", brand::ok()),
+        crate::core::Phase::Degraded => ("•", brand::warn()),
+        crate::core::Phase::Failed => ("✗", brand::err()),
+        crate::core::Phase::Configured | crate::core::Phase::Connected => ("•", brand::warn()),
+        _ => ("○", brand::secondary()),
     };
     items.push(ListItem::new(Line::from(vec![
         Span::raw(" "),
@@ -274,6 +297,37 @@ fn draw_home(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(brand::on_accent()).bg(color).bold(),
         ),
     ])));
+    // Compact component chips: the dashboard must show what is healthy
+    // without forcing the user into the diagnostics screen.
+    let chips: Vec<String> = [
+        crate::core::Component::Bypass,
+        crate::core::Component::Dns,
+        crate::core::Component::Mtproto,
+        crate::core::Component::Subscriptions,
+    ]
+    .iter()
+    .map(|c| {
+        let st = app.core.status(*c);
+        let m = match st.phase {
+            crate::core::Phase::Operational => "✓",
+            crate::core::Phase::Degraded => "•",
+            crate::core::Phase::Failed => "✗",
+            crate::core::Phase::Disabled => "–",
+            _ => "?",
+        };
+        format!("{m} {}", if lang == "en" { c.name_en() } else { c.name_ru() })
+    })
+    .collect();
+    items.push(ListItem::new(Line::from(Span::styled(
+        format!("   {}", chips.join(" · ")),
+        Style::default().fg(brand::muted()),
+    ))));
+    if let Some(msg) = &app.status_msg {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("   {msg}"),
+            Style::default().fg(brand::warn()),
+        ))));
+    }
     items.push(ListItem::new(Line::from("")));
 
     let width = inner_width(area);
@@ -293,8 +347,8 @@ fn draw_home(f: &mut Frame, area: Rect, app: &App) {
                 tr(lang, "Проверить", "Check"),
                 tr(
                     lang,
-                    "за пару секунд покажет, что не так",
-                    "shows what is wrong in a few seconds",
+                    "состояние сети и что именно не так",
+                    "network health and what exactly is wrong",
                 ),
             ),
             HomeItem::Update => (
@@ -315,11 +369,19 @@ fn draw_home(f: &mut Frame, area: Rect, app: &App) {
             ),
             HomeItem::More => (
                 tr(lang, "Ещё", "More"),
-                tr(lang, "компоненты и диагностика", "components and diagnostics"),
+                tr(
+                    lang,
+                    "сеть, профили, компоненты, история, настройки",
+                    "network, profiles, components, history, settings",
+                ),
             ),
-            HomeItem::Settings => (
-                tr(lang, "Настройки", "Settings"),
-                tr(lang, "язык, папка данных, напоминания", "language, data folder, reminders"),
+            HomeItem::Profiles => (
+                tr(lang, "Профили", "Profiles"),
+                tr(
+                    lang,
+                    "готовые наборы: игры, Telegram, браузер…",
+                    "presets: gaming, Telegram, browser...",
+                ),
             ),
             HomeItem::Exit => (tr(lang, "Выход", "Exit"), ""),
         })
@@ -747,7 +809,7 @@ fn draw_check(f: &mut Frame, area: Rect, app: &App) {
         None => {
             f.render_widget(
                 Paragraph::new(tr(lang, "  Проверяю доступ...", "  Checking access..."))
-                    .block(block(tr(lang, "Проверка", "Check")))
+                    .block(block(tr(lang, "Состояние сети", "Network health")))
                     .style(Style::default().fg(brand::accent())),
                 area,
             );
@@ -806,6 +868,31 @@ fn draw_check(f: &mut Frame, area: Rect, app: &App) {
                 ]));
             }
             lines.push(Line::from(""));
+            if let Some(report) = &app.health_report {
+                lines.push(Line::from(Span::styled(
+                    tr(lang, "  Этапы подключения:", "  Connection stages:"),
+                    Style::default().fg(brand::text()).bold(),
+                )));
+                for st in &report.stages {
+                    let (mark, color) = match st.ok {
+                        Some(true) => ("✓", brand::ok()),
+                        Some(false) => ("✗", brand::err()),
+                        None => ("–", brand::muted()),
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("   {mark} "), Style::default().fg(color).bold()),
+                        Span::styled(
+                            format!("{:<22}", if lang == "en" { st.stage.name_en() } else { st.stage.name_ru() }),
+                            Style::default().fg(brand::text()),
+                        ),
+                        Span::styled(
+                            st.detail(lang).to_string(),
+                            Style::default().fg(brand::secondary()),
+                        ),
+                    ]));
+                }
+                lines.push(Line::from(""));
+            }
             lines.push(Line::from(Span::styled(
                 tr(
                     lang,
@@ -823,11 +910,169 @@ fn draw_check(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(brand::muted()),
             )));
             f.render_widget(
-                Paragraph::new(lines).block(block(tr(lang, "Проверка", "Check"))),
+                Paragraph::new(lines).block(block(tr(lang, "Состояние сети", "Network health"))),
                 area,
             );
         }
     }
+}
+
+fn draw_profiles(f: &mut Frame, area: Rect, app: &App) {
+    let lang = app.cfg.lang.as_str();
+    let width = inner_width(area);
+    let names: Vec<String> = app
+        .profiles
+        .profiles
+        .iter()
+        .map(|p| p.name(lang).to_string())
+        .collect();
+    let col = menu_col(names.iter().map(String::as_str));
+    let mut items: Vec<ListItem> = Vec::new();
+    for (i, p) in app.profiles.profiles.iter().enumerate() {
+        let note = if p.description(lang).is_empty() {
+            String::new()
+        } else {
+            p.description(lang).to_string()
+        };
+        items.push(menu_row(&names[i], &note, i == app.profile_idx, width, col));
+    }
+    if let Some(msg) = &app.status_msg {
+        items.push(ListItem::new(Line::from("")));
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  {msg}"),
+            Style::default().fg(brand::warn()),
+        ))));
+    }
+    let mut state = ListState::default();
+    state.select(Some(app.profile_idx.min(names.len().saturating_sub(1))));
+    f.render_stateful_widget(
+        List::new(items).block(block(tr(lang, "Профили", "Profiles"))),
+        area,
+        &mut state,
+    );
+}
+
+fn draw_profile_plan(f: &mut Frame, area: Rect, app: &App) {
+    let lang = app.cfg.lang.as_str();
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    if let Some((p, changes)) = &app.profile_plan {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", p.name(lang)),
+            Style::default().fg(brand::accent()).bold(),
+        )));
+        lines.push(Line::from(""));
+        if changes.is_empty() {
+            lines.push(Line::from(tr(
+                lang,
+                "  Настройки уже совпадают — менять нечего.",
+                "  Settings already match - nothing to change.",
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                tr(lang, "  Будет изменено:", "  Will change:"),
+                Style::default().fg(brand::text()).bold(),
+            )));
+            for c in changes {
+                lines.push(Line::from(format!("   • {}", c.text(lang))));
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+                tr(
+                    lang,
+                    "  Ничего не изменится, пока вы не нажмёте Enter.",
+                    "  Nothing changes until you press Enter.",
+                ),
+                Style::default().fg(brand::warn()),
+            )));
+        if changes.iter().any(|c| c.text(lang).contains("выкл") || c.text(lang).contains("off")) {
+            lines.push(Line::from(Span::styled(
+                tr(
+                    lang,
+                    "  Выключение уже работающего обхода — пункт «Выключить» в меню.",
+                    "  To stop a running bypass, use \"Turn off\" in the menu.",
+                ),
+                Style::default().fg(brand::muted()),
+            )));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block(tr(lang, "Профиль — проверка", "Profile review")))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_profile_edit(f: &mut Frame, area: Rect, app: &App) {
+    let lang = app.cfg.lang.as_str();
+    let Some(p) = &app.editing_profile else {
+        return;
+    };
+    let width = inner_width(area);
+    let onoff = |v: bool| tr(lang, if v { "вкл" } else { "выкл" }, if v { "on" } else { "off" });
+    let rows: [(&str, &str); crate::app::PROFILE_ROWS] = [
+        (tr(lang, "Обход YouTube/Discord", "YouTube/Discord bypass"), onoff(p.bypass)),
+        (tr(lang, "DNS", "DNS"), onoff(p.dns)),
+        (tr(lang, "Hosts", "Hosts"), onoff(p.hosts)),
+        (tr(lang, "Прокси Telegram", "Telegram proxy"), onoff(p.mtproto)),
+        (tr(lang, "Мост TgWsProxy", "TgWsProxy bridge"), onoff(p.tgws)),
+        (tr(lang, "Подписки", "Subscriptions"), onoff(p.subscriptions)),
+        (
+            tr(lang, "Приложение для серверов", "Servers app"),
+            crate::core::profiles::client_name(&p.client, lang),
+        ),
+        (tr(lang, "Запускать при старте Windows", "Start with Windows"), onoff(p.autostart)),
+        (tr(lang, "Сохранить профиль", "Save profile"), "Enter"),
+    ];
+    let titles: Vec<String> = rows.iter().map(|(t, _)| t.to_string()).collect();
+    let col = menu_col(titles.iter().map(String::as_str));
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (title, value))| {
+            menu_row(title, value, i == app.profile_edit_row, width, col)
+        })
+        .collect();
+    let title = format!(
+        "{} — {}",
+        tr(lang, "Свой профиль", "Custom profile"),
+        p.name(lang)
+    );
+    let mut state = ListState::default();
+    state.select(Some(app.profile_edit_row));
+    f.render_stateful_widget(List::new(items).block(block(&title)), area, &mut state);
+}
+
+fn draw_history(f: &mut Frame, area: Rect, app: &App) {
+    let lang = app.cfg.lang.as_str();
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    let entries: Vec<_> = app.history.recent(40).collect();
+    if entries.is_empty() {
+        lines.push(Line::from(tr(
+            lang,
+            "  Пока пусто. Здесь появятся настройки, проверки и обновления.",
+            "  Empty for now. Setup, checks and updates will appear here.",
+        )));
+    }
+    for e in entries {
+        let mark = if e.ok { "✓" } else { "!" };
+        let color = if e.ok { brand::ok() } else { brand::warn() };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {} ", e.stamp()),
+                Style::default().fg(brand::muted()),
+            ),
+            Span::styled(format!("{mark} "), Style::default().fg(color).bold()),
+            Span::raw(e.text(lang).to_string()),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block(tr(lang, "История", "History")))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn draw_advanced(f: &mut Frame, area: Rect, app: &App) {
@@ -837,17 +1082,29 @@ fn draw_advanced(f: &mut Frame, area: Rect, app: &App) {
         .adv_items()
         .iter()
         .map(|item| match item {
+            AdvItem::Health => (
+                tr(lang, "Состояние сети", "Network health"),
+                tr(lang, "DNS, соединение, прокси, сайты", "DNS, connection, proxy, sites"),
+            ),
             AdvItem::Components => (
                 tr(lang, "Компоненты", "Components"),
                 tr(lang, "что включать", "what to turn on"),
             ),
-            AdvItem::Wizard => (
-                tr(lang, "Мастер настройки", "Setup wizard"),
-                tr(lang, "пошагово", "step by step"),
+            AdvItem::History => (
+                tr(lang, "История", "History"),
+                tr(lang, "что и когда делала программа", "what the app did and when"),
             ),
-            AdvItem::Status => (
+            AdvItem::Diagnostics => (
                 tr(lang, "Диагностика", "Diagnostics"),
                 tr(lang, "права, пути, версии", "rights, paths, versions"),
+            ),
+            AdvItem::Settings => (
+                tr(lang, "Настройки", "Settings"),
+                tr(lang, "язык, папка данных, напоминания", "language, data folder, reminders"),
+            ),
+            AdvItem::Wizard => (
+                tr(lang, "Мастер настройки", "Setup wizard"),
+                tr(lang, "пошагово, для технарей", "step by step, for technical users"),
             ),
             AdvItem::Back => (tr(lang, "Назад", "Back"), ""),
         })

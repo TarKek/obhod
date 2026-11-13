@@ -1,10 +1,13 @@
 mod app;
 mod brand;
 mod config;
+mod core;
 mod logger;
 mod modules;
+mod net;
 mod selfupdate;
 mod state;
+mod sys;
 mod ui;
 mod util;
 mod worker;
@@ -73,6 +76,13 @@ fn main() {
             Ok(true) => return,
             Ok(false) => println!("обновлений нет ({})", selfupdate::current_version()),
             Err(e) => eprintln!("obhod: обновление не удалось: {e:#}"),
+        }
+        return;
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--import-profile") {
+        match args.get(pos + 1) {
+            Some(path) => import_profile_cli(path),
+            None => eprintln!("obhod: --import-profile требует путь к JSON"),
         }
         return;
     }
@@ -173,6 +183,10 @@ fn demo_static(mode: app::Mode) {
         ("UPDATE", app::Screen::Update),
         ("SETTINGS", app::Screen::Settings),
         ("ADVANCED", app::Screen::Advanced),
+        ("PROFILES", app::Screen::Profiles),
+        ("PROFILE_PLAN", app::Screen::ProfilePlan),
+        ("PROFILE_EDIT", app::Screen::ProfileEdit),
+        ("HISTORY", app::Screen::History),
         ("PROGRESS", app::Screen::Progress),
     ];
     for (name, screen) in screens {
@@ -187,6 +201,46 @@ fn demo_static(mode: app::Mode) {
         }
         if matches!(screen, app::Screen::Check) {
             app.check_items = Some(crate::modules::check::demo());
+        }
+        if matches!(screen, app::Screen::Profiles) {
+            app.profile_idx = 1;
+        }
+        if matches!(screen, app::Screen::ProfilePlan) {
+            if let Some(p) = app.profiles.profiles.get(1).cloned() {
+                let changes = crate::core::profiles::plan(&p, &app.current_profile());
+                app.profile_plan = Some((p, changes));
+            }
+        }
+        if matches!(screen, app::Screen::ProfileEdit) {
+            app.editing_profile = app.profiles.profiles.get(5).cloned();
+            app.profile_edit_row = 3;
+        }
+        if matches!(screen, app::Screen::History) {
+            use crate::core::history::HistoryEntry;
+            app.history.entries = vec![
+                HistoryEntry::new("setup", "Включено: обход и Telegram", "Turned on: bypass and Telegram", true),
+                HistoryEntry::new("check", "Проверка сети: 5 из 5", "Network check: 5 of 5", true),
+                HistoryEntry::new("update", "Обновлены подписки", "Subscriptions updated", true),
+                HistoryEntry::new("off", "Выключено, DNS возвращён", "Turned off, DNS restored", true),
+            ];
+        }
+        if matches!(screen, app::Screen::Check) {
+            let signals = crate::core::health::Signals {
+                dns_ok: Some(true),
+                tcp_ok: Some(true),
+                tls_ok: Some(true),
+                proxy_configured: true,
+                proxy_running: true,
+                proxy_verified: true,
+                bypass_running: true,
+                mtproto_ready: true,
+                target_ok: Some(false),
+                ..Default::default()
+            };
+            app.health_report = Some(crate::core::health::evaluate(
+                &signals,
+                crate::state::now_secs(),
+            ));
         }
         if matches!(screen, app::Screen::Status) {
             app.status = app::build_status(&app.cfg);
@@ -215,6 +269,22 @@ fn demo_static(mode: app::Mode) {
             }
             println!("{}", line.trim_end());
         }
+    }
+}
+
+fn import_profile_cli(path: &str) {
+    let cfg = config::Config::load();
+    let _ = cfg.ensure_dirs();
+    let mut store = core::ProfileStore::load(&cfg.data_dir());
+    match std::fs::read_to_string(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|t| store.import_str(&t))
+    {
+        Ok(p) => match store.save(&cfg.data_dir()) {
+            Ok(()) => println!("импортирован профиль {} ({})", p.id, p.name_ru),
+            Err(e) => eprintln!("obhod: профиль разобран, но не сохранён: {e:#}"),
+        },
+        Err(e) => eprintln!("obhod: профиль не импортирован: {e:#}"),
     }
 }
 
@@ -295,6 +365,9 @@ fn selftest() {
     for f in found {
         println!("{:<10} {}  [{}]", f.key, f.ru, f.detail);
     }
+    let profiles = core::ProfileStore::load(&cfg.data_dir());
+    println!("profiles     : {}", profiles.profiles.len());
+    println!("history file : {}", core::history::History::load(&cfg.data_dir(), 5).entries.len());
     println!("config file  : {}", config::Config::path().display());
     println!("brand file   : {}", brand::path().display());
     println!("brand name   : {}", brand::name());

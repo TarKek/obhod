@@ -1,8 +1,11 @@
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{bail, Context, Result};
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::modules::{clients, detect, Ctx};
+use crate::net::{sha256_file, trust};
 use crate::state::{now_secs, State};
 use crate::util;
 
@@ -71,6 +74,450 @@ fn short(v: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Staged component updates
+// ---------------------------------------------------------------------------
+//
+// Rule: the working copy is never deleted before the new one is downloaded,
+// extracted, CRC-checked, hash-checked and its expected executable is present.
+// The old file/directory is kept as a backup; if the swap or the post-swap
+// verification fails, the old version is put back automatically.
+
+/// Verified payload waiting to be swapped in.
+pub struct Staging {
+    pub root: PathBuf,
+    /// Expected executable (for archives) or the staged copy of it.
+    pub exe: PathBuf,
+    pub sha256: String,
+    pub entries: usize,
+}
+
+pub struct InstallReport {
+    pub target: PathBuf,
+    pub exe: PathBuf,
+    pub backup: Option<PathBuf>,
+    pub sha256: String,
+    pub moved_old: bool,
+}
+
+fn stamp() -> String {
+    now_secs().to_string()
+}
+
+fn fresh_dir(root: &Path, tag: &str) -> Result<PathBuf> {
+    fs::create_dir_all(root)?;
+    let safe: String = tag
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(24)
+        .collect();
+    let dir = root.join(format!("{}-{}-{}", safe, std::process::id(), stamp()));
+    if dir.exists() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn is_windows_exe(path: &Path) -> bool {
+    let Ok(mut f) = fs::File::open(path) else {
+        return false;
+    };
+    let mut b = [0u8; 2];
+    matches!(f.read_exact(&mut b), Ok(())) && &b == b"MZ"
+}
+
+/// Reads every archive entry once: a CRC/size error means the download is
+/// corrupt. Also caps the unpacked size to avoid a zip bomb.
+fn verify_zip(zip: &Path) -> Result<usize> {
+    const MAX_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
+    let f = fs::File::open(zip).with_context(|| format!("открыть {}", zip.display()))?;
+    let mut ar = zip::ZipArchive::new(f).context("архив не читается как zip")?;
+    if ar.len() == 0 {
+        bail!("архив пуст");
+    }
+    let mut total: u64 = 0;
+    for i in 0..ar.len() {
+        let mut entry = ar
+            .by_index(i)
+            .with_context(|| format!("запись #{i} повреждена"))?;
+        total = total.saturating_add(entry.size());
+        if total > MAX_TOTAL {
+            bail!("распакованный размер архива слишком большой");
+        }
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        std::io::copy(&mut entry, &mut std::io::sink())
+            .with_context(|| format!("CRC-проверка записи «{name}»"))?;
+    }
+    Ok(ar.len())
+}
+
+fn extract_zip(zip: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    let f = fs::File::open(zip)?;
+    let mut ar = zip::ZipArchive::new(f)?;
+    // The zip crate rejects entries escaping the destination directory.
+    ar.extract(dest).context("не удалось распаковать архив")?;
+    Ok(())
+}
+
+fn check_exe(path: &Path, expected_sha: Option<&str>) -> Result<String> {
+    if !path.is_file() {
+        bail!("нет файла {}", path.display());
+    }
+    if fs::metadata(path)?.len() < 2 {
+        bail!("файл {} пуст", path.display());
+    }
+    if !is_windows_exe(path) {
+        bail!("файл {} не является программой Windows (нет MZ)", path.display());
+    }
+    let sha = sha256_file(path)?;
+    if let Some(exp) = expected_sha {
+        let want = trust::normalize_sha256(exp).unwrap_or_else(|| exp.trim().to_ascii_lowercase());
+        if want != sha {
+            bail!("sha256 не совпадает: ожидалось {want}, получено {sha}");
+        }
+    }
+    Ok(sha)
+}
+
+/// Verifies a zip and extracts it to a fresh staging directory.
+pub fn prepare_from_zip(
+    zip: &Path,
+    staging_root: &Path,
+    expected_exe: &str,
+    expected_archive_sha: Option<&str>,
+) -> Result<Staging> {
+    if let Some(exp) = expected_archive_sha {
+        let got = sha256_file(zip)?;
+        let want = trust::normalize_sha256(exp).unwrap_or_else(|| exp.trim().to_ascii_lowercase());
+        if want != got {
+            bail!("sha256 архива не совпадает: ожидалось {want}, получено {got}");
+        }
+    }
+    let entries = verify_zip(zip)?;
+    let root = fresh_dir(staging_root, "zip")?;
+    let result = (|| -> Result<Staging> {
+        extract_zip(zip, &root)?;
+        let exe = detect::find_exe_in(&root, expected_exe, 6)
+            .with_context(|| format!("в архиве нет {expected_exe} — версия несовместима"))?;
+        let sha = check_exe(&exe, None)?;
+        Ok(Staging {
+            root: root.clone(),
+            exe,
+            sha256: sha,
+            entries,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&root);
+    }
+    result
+}
+
+/// Copies a single executable into staging after MZ/hash checks.
+pub fn prepare_from_exe(
+    exe: &Path,
+    staging_root: &Path,
+    expected_sha: Option<&str>,
+) -> Result<Staging> {
+    let sha = check_exe(exe, expected_sha)?;
+    let root = fresh_dir(staging_root, "exe")?;
+    let name = exe
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("component.exe"));
+    let dest = root.join(name);
+    if let Err(e) = fs::copy(exe, &dest) {
+        let _ = fs::remove_dir_all(&root);
+        return Err(e).context("не удалось скопировать файл в staging");
+    }
+    let dest_sha = match check_exe(&dest, Some(&sha)) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&root);
+            return Err(e);
+        }
+    };
+    Ok(Staging {
+        root,
+        exe: dest,
+        sha256: dest_sha,
+        entries: 1,
+    })
+}
+
+fn copy_tree(src: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if from.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .with_context(|| format!("копирование {}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn move_dir(src: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        fs::remove_dir_all(dest)?;
+    }
+    match fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Different volume (e.g. data dir on D:, client in %LOCALAPPDATA%).
+            copy_tree(src, dest)?;
+            fs::remove_dir_all(src).ok();
+            Ok(())
+        }
+    }
+}
+
+/// Deletes older staging directories, keeping the one just used.
+pub fn cleanup_staging(root: &Path, keep: &Path) {
+    let Ok(rd) = fs::read_dir(root) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p == keep {
+            continue;
+        }
+        if p.is_dir() {
+            let _ = fs::remove_dir_all(&p);
+        }
+    }
+}
+
+/// Swaps a single executable in place, with a backup and rollback.
+pub fn install_exe(staged: &Staging, target: &Path, backup_root: &Path) -> Result<InstallReport> {
+    if sha256_file(&staged.exe)? != staged.sha256 {
+        bail!("подготовленный файл изменился после проверки");
+    }
+    let parent = target
+        .parent()
+        .with_context(|| format!("у {} нет папки", target.display()))?;
+    fs::create_dir_all(parent)?;
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("component.exe");
+
+    let backup = if target.exists() {
+        fs::create_dir_all(backup_root)?;
+        let b = backup_root.join(format!("{name}.bak-{}", stamp()));
+        fs::copy(target, &b)
+            .with_context(|| format!("не удалось сохранить резервную копию {}", b.display()))?;
+        let src_len = fs::metadata(target)?.len();
+        if fs::metadata(&b)?.len() != src_len {
+            bail!("резервная копия {} неполная", b.display());
+        }
+        Some(b)
+    } else {
+        None
+    };
+
+    let tmp = parent.join(format!(".{name}.new-{}", stamp()));
+    fs::copy(&staged.exe, &tmp).context("не удалось записать новую версию")?;
+    if sha256_file(&tmp).unwrap_or_default() != staged.sha256 {
+        let _ = fs::remove_file(&tmp);
+        bail!("новая версия повреждена при записи");
+    }
+
+    let old = parent.join(format!(".{name}.old-{}", stamp()));
+    let moved = if target.exists() {
+        if let Err(e) = fs::rename(target, &old) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e)
+                .with_context(|| format!("не удалось отодвинуть {}", target.display()));
+        }
+        true
+    } else {
+        false
+    };
+
+    if let Err(e) = fs::rename(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        if moved {
+            let _ = fs::rename(&old, target);
+        }
+        return Err(e).context("не удалось заменить файл");
+    }
+
+    // Post-swap verification: compare what actually landed on disk.
+    match sha256_file(target) {
+        Ok(h) if h == staged.sha256 => {}
+        _ => {
+            let _ = fs::remove_file(target);
+            if moved {
+                let _ = fs::rename(&old, target);
+            }
+            bail!("после замены файл не совпадает — вернул прежнюю версию");
+        }
+    }
+    if moved {
+        let _ = fs::remove_file(&old);
+    }
+    Ok(InstallReport {
+        target: target.to_path_buf(),
+        exe: target.to_path_buf(),
+        backup,
+        sha256: staged.sha256.clone(),
+        moved_old: moved,
+    })
+}
+
+/// Swaps a whole directory (portable program), with a backup and rollback.
+pub fn install_dir(
+    staged: &Staging,
+    target: &Path,
+    expected_exe: &str,
+    backup_root: &Path,
+) -> Result<InstallReport> {
+    let staged_exe = detect::find_exe_in(&staged.root, expected_exe, 6)
+        .with_context(|| format!("подготовленная копия не содержит {expected_exe}"))?;
+    let sha = sha256_file(&staged_exe)?;
+    if sha != staged.sha256 {
+        bail!("подготовленная копия изменилась после проверки");
+    }
+    let parent = target
+        .parent()
+        .with_context(|| format!("у {} нет папки", target.display()))?;
+    fs::create_dir_all(parent)?;
+    fs::create_dir_all(backup_root)?;
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("component");
+
+    let backup = if target.exists() {
+        let b = backup_root.join(format!("{name}.bak-{}", stamp()));
+        copy_tree(target, &b)
+            .with_context(|| format!("не удалось сохранить копию {}", target.display()))?;
+        Some(b)
+    } else {
+        None
+    };
+
+    let old = parent.join(format!(".{name}.old-{}", stamp()));
+    let moved = if target.exists() {
+        if let Err(e) = fs::rename(target, &old) {
+            return Err(e).with_context(|| {
+                format!(
+                    "не удалось отодвинуть папку {} (закройте программу и повторите)",
+                    target.display()
+                )
+            });
+        }
+        true
+    } else {
+        false
+    };
+
+    if let Err(e) = move_dir(&staged.root, target) {
+        if moved {
+            let _ = fs::rename(&old, target);
+        }
+        return Err(e).context("не удалось подменить папку");
+    }
+
+    let installed_exe = detect::find_exe_in(target, expected_exe, 6);
+    let ok = installed_exe
+        .as_deref()
+        .map(|p| sha256_file(p).map(|h| h == sha).unwrap_or(false))
+        .unwrap_or(false);
+    if !ok {
+        let _ = fs::remove_dir_all(target);
+        if moved {
+            let _ = fs::rename(&old, target);
+        }
+        bail!("после замены {expected_exe} не найден или повреждён — вернул прежнюю версию");
+    }
+    if moved {
+        let _ = fs::remove_dir_all(&old);
+    }
+    Ok(InstallReport {
+        target: target.to_path_buf(),
+        exe: installed_exe.unwrap_or_else(|| target.join(expected_exe)),
+        backup,
+        sha256: sha,
+        moved_old: moved,
+    })
+}
+
+/// Downloads the latest zip of `repo`, verifies it and swaps it into
+/// `target_dir` (used for our own portable copies).
+fn update_own_zip(
+    ctx: &Ctx,
+    client: &reqwest::blocking::Client,
+    repo: &str,
+    expected_exe: &str,
+    target_dir: &Path,
+) -> Result<()> {
+    let dl = ctx.dir("downloads");
+    fs::create_dir_all(&dl)?;
+    let zip = util::github_asset(client, repo, ".zip", &dl)?;
+    let staging_root = ctx.dir("staging");
+    let staged = prepare_from_zip(&zip, &staging_root, expected_exe, None)?;
+    let report = install_dir(&staged, target_dir, expected_exe, &ctx.dir("backup"))?;
+    cleanup_staging(&staging_root, &report.target);
+    let backup = report
+        .backup
+        .as_ref()
+        .map(|b| b.display().to_string())
+        .unwrap_or_else(|| "нет (первая установка)".into());
+    ctx.log(format!(
+        "  проверено: sha256 {}… · старая версия: {}",
+        &report.sha256[..12],
+        backup
+    ));
+    Ok(())
+}
+
+/// Same for a single executable component (TgWsProxy).
+fn update_own_exe(
+    ctx: &Ctx,
+    client: &reqwest::blocking::Client,
+    repo: &str,
+    target_dir: &Path,
+) -> Result<PathBuf> {
+    let dl = ctx.dir("downloads");
+    fs::create_dir_all(&dl)?;
+    let exe = util::github_asset(client, repo, ".exe", &dl)?;
+    let staging_root = ctx.dir("staging");
+    let staged = prepare_from_exe(&exe, &staging_root, None)?;
+    let name = exe
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("component.exe"));
+    let report = install_exe(&staged, &target_dir.join(name), &ctx.dir("backup"))?;
+    cleanup_staging(&staging_root, &staged.root);
+    ctx.log(format!(
+        "  проверено: sha256 {}… · резервная копия: {}",
+        &report.sha256[..12],
+        report
+            .backup
+            .as_ref()
+            .map(|b| b.display().to_string())
+            .unwrap_or_else(|| "нет".into())
+    ));
+    Ok(report.exe)
 }
 
 /// Read-only check: finds installed programs anywhere on the machine and
@@ -268,16 +715,28 @@ pub fn update_tools(ctx: &Ctx) -> Result<()> {
         if dir.exists() && !handled.contains(&"zapret") {
             ctx.progress(20, "zapret".to_string());
             let tag = util::github_latest_tag(&client, "Flowseal/zapret-discord-youtube").ok();
-            ctx.log("Обновляю свою копию zapret...");
-            std::fs::remove_dir_all(&dir).ok();
-            match crate::modules::zapret::run(&forced_ctx(ctx)) {
-                Ok(_) => {
-                    if let Some(t) = &tag {
-                        st.set_tool("zapret", t);
+            ctx.log("Обновляю свою копию zapret: скачиваю и проверяю новую версию...");
+            match update_own_zip(
+                ctx,
+                &client,
+                "Flowseal/zapret-discord-youtube",
+                "winws.exe",
+                &dir,
+            ) {
+                Ok(_) => match crate::modules::zapret::run(&forced_ctx(ctx)) {
+                    Ok(_) => {
+                        if let Some(t) = &tag {
+                            st.set_tool("zapret", t);
+                        }
+                        ctx.log("✓ zapret обновлён.");
                     }
-                    ctx.log("✓ zapret обновлён.");
-                }
-                Err(e) => ctx.log(format!("⚠ zapret: {e:#}")),
+                    Err(e) => ctx.log(format!(
+                        "⚠ zapret скачан, но настроить не удалось: {e:#}"
+                    )),
+                },
+                Err(e) => ctx.log(format!(
+                    "⚠ zapret: {e:#}. Прежняя копия сохранена и не тронута."
+                )),
             }
         }
     }
@@ -287,16 +746,20 @@ pub fn update_tools(ctx: &Ctx) -> Result<()> {
         if dir.exists() && !handled.contains(&"tgws") {
             ctx.progress(40, "TgWsProxy".to_string());
             let tag = util::github_latest_tag(&client, "Flowseal/tg-ws-proxy").ok();
-            ctx.log("Обновляю свою копию TgWsProxy...");
-            std::fs::remove_dir_all(&dir).ok();
-            match crate::modules::tgws::run(&forced_ctx(ctx)) {
-                Ok(_) => {
-                    if let Some(t) = &tag {
-                        st.set_tool("tgws", t);
+            ctx.log("Обновляю свою копию TgWsProxy: скачиваю и проверяю новую версию...");
+            match update_own_exe(ctx, &client, "Flowseal/tg-ws-proxy", &dir) {
+                Ok(exe) => match crate::modules::tgws::run_from(&forced_ctx(ctx), Some(&exe)) {
+                    Ok(_) => {
+                        if let Some(t) = &tag {
+                            st.set_tool("tgws", t);
+                        }
+                        ctx.log("✓ TgWsProxy обновлён.");
                     }
-                    ctx.log("✓ TgWsProxy обновлён.");
-                }
-                Err(e) => ctx.log(format!("⚠ TgWsProxy: {e:#}")),
+                    Err(e) => ctx.log(format!("⚠ TgWsProxy: {e:#}")),
+                },
+                Err(e) => ctx.log(format!(
+                    "⚠ TgWsProxy: {e:#}. Прежняя копия сохранена и не тронута."
+                )),
             }
         }
     }
@@ -319,16 +782,19 @@ pub fn update_tools(ctx: &Ctx) -> Result<()> {
                 _ => app,
             };
             ctx.progress(60, name.to_string());
-            ctx.log(format!("Обновляю {name}..."));
-            std::fs::remove_dir_all(&base).ok();
-            match clients::run(&forced_ctx(ctx)) {
+            ctx.log(format!(
+                "Обновляю {name}: скачиваю и проверяю новую версию..."
+            ));
+            match clients::update_copy(&forced_ctx(ctx)) {
                 Ok(_) => {
                     if let Some(t) = &tag {
                         st.set_tool(key, t);
                     }
                     ctx.log(format!("✓ {name} обновлён."));
                 }
-                Err(e) => ctx.log(format!("⚠ {name}: {e:#}")),
+                Err(e) => ctx.log(format!(
+                    "⚠ {name}: {e:#}. Прежняя копия сохранена и не тронута."
+                )),
             }
         }
     }
@@ -464,23 +930,29 @@ fn update_found_tgws(
             return false;
         }
     };
+    let staged = match prepare_from_exe(&new_exe, &ctx.dir("staging"), None) {
+        Ok(s) => s,
+        Err(e) => {
+            ctx.log(format!(
+                "⚠ TgWsProxy: {e:#}. Текущая версия не тронута."
+            ));
+            return false;
+        }
+    };
     if app.running {
         let _ = util::hidden_str("taskkill", &["/IM", "TgWsProxy.exe", "/F"]);
     }
-    let backup = path.with_file_name(format!(
-        "{}.bak-{}",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("TgWsProxy.exe"),
-        now_secs()
-    ));
-    let _ = std::fs::copy(path, &backup);
-    match std::fs::copy(&new_exe, path) {
-        Ok(_) => {
+    match install_exe(&staged, path, &ctx.dir("backup")) {
+        Ok(report) => {
+            cleanup_staging(&ctx.dir("staging"), &staged.root);
             st.set_tool("tgws", &latest);
             ctx.log(format!(
-                "✓ TgWsProxy обновлён (бэкап: {})",
-                backup.display()
+                "✓ TgWsProxy обновлён (резервная копия: {})",
+                report
+                    .backup
+                    .as_ref()
+                    .map(|b| b.display().to_string())
+                    .unwrap_or_else(|| "нет".into())
             ));
             if app.running {
                 let _ = Command::new(path).spawn();
@@ -488,7 +960,9 @@ fn update_found_tgws(
             true
         }
         Err(e) => {
-            ctx.log(format!("⚠ Не удалось заменить TgWsProxy: {e}"));
+            ctx.log(format!(
+                "⚠ Не удалось заменить TgWsProxy: {e:#}. Прежняя версия сохранена."
+            ));
             false
         }
     }

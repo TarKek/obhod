@@ -16,19 +16,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release
-        run: cargo build --release
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Tests
         run: cargo test --release
-      - name: Smoke test
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Smoke test (no elevation, no system changes)
         run: .\target\release\obhod.exe --selftest
+
+      - name: Demo screens render
+        run: .\target\release\obhod.exe --demo-static -m demo > $env:TEMP\obhod-demo.txt
+
+      - name: Checksums
+        run: |
+          $h = (Get-FileHash target\release\obhod.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  obhod.exe" | Out-File -Encoding ascii target\release\SHA256SUMS
+          Get-Content target\release\SHA256SUMS
+
       - uses: actions/upload-artifact@v4
         with:
           name: obhod-windows-x64
-          path: target/release/obhod.exe
+          path: |
+            target/release/obhod.exe
+            target/release/SHA256SUMS
+
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/obhod.exe
+          files: |
+            target/release/obhod.exe
+            target/release/SHA256SUMS
           generate_release_notes: true

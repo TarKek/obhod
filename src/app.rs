@@ -2,6 +2,11 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 use crate::config::{Components, Config};
+use crate::core::background::{self, Tick};
+use crate::core::health::{self, HealthReport, Signals};
+use crate::core::history::{History, HistoryEntry};
+use crate::core::profiles::{self, Change, Current, Profile, ProfileStore};
+use crate::core::state::{Component, CoreState, Phase};
 use crate::modules::{detect, RunOptions};
 use crate::util;
 use crate::worker::{self, Msg};
@@ -54,18 +59,21 @@ pub enum Health {
 pub enum HomeItem {
     Setup,
     Off,
+    Profiles,
     Check,
     Update,
-    Settings,
     More,
     Exit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AdvItem {
+    Health,
     Components,
+    History,
+    Diagnostics,
+    Settings,
     Wizard,
-    Status,
     Back,
 }
 
@@ -95,6 +103,10 @@ pub enum Screen {
     Settings,
     Update,
     Off,
+    Profiles,
+    ProfilePlan,
+    ProfileEdit,
+    History,
 }
 
 pub enum StepKind {
@@ -146,6 +158,20 @@ pub struct App {
     pub check_items: Option<Vec<crate::modules::check::CheckItem>>,
     /// Result of the last setup/off run: whether all steps succeeded.
     pub last_ok: bool,
+    /// Single source of truth for component phases.
+    pub core: CoreState,
+    pub profiles: ProfileStore,
+    pub profile_idx: usize,
+    /// Selected profile and the changes the user must confirm.
+    pub profile_plan: Option<(Profile, Vec<Change>)>,
+    pub editing_profile: Option<Profile>,
+    pub profile_edit_row: usize,
+    pub health_report: Option<HealthReport>,
+    pub history: History,
+    /// Short status line for profile import/export and similar actions.
+    pub status_msg: Option<String>,
+    /// Heartbeat from the background monitor (health refresh, update nudge).
+    pub bg_rx: Option<Receiver<Tick>>,
 }
 
 pub fn tr<'a>(lang: &str, ru: &'a str, en: &'a str) -> &'a str {
@@ -156,6 +182,8 @@ pub fn tr<'a>(lang: &str, ru: &'a str, en: &'a str) -> &'a str {
     }
 }
 
+pub const PROFILE_ROWS: usize = 9;
+
 impl App {
     pub fn new(mode: Mode) -> Self {
         let cfg = Config::load();
@@ -164,6 +192,7 @@ impl App {
         } else {
             Screen::Home
         };
+        let data_dir = cfg.data_dir();
         let mut app = Self {
             cfg,
             screen,
@@ -195,7 +224,38 @@ impl App {
             check_rx: None,
             check_items: None,
             last_ok: true,
+            core: CoreState::new(),
+            profiles: ProfileStore::load(&data_dir),
+            profile_idx: 0,
+            profile_plan: None,
+            editing_profile: None,
+            profile_edit_row: 0,
+            health_report: None,
+            history: History::default(),
+            status_msg: None,
+            bg_rx: None,
         };
+        if let Ok(()) = app.cfg.ensure_dirs() {
+            app.profiles = ProfileStore::load(&data_dir);
+            app.history = History::load(&data_dir, 200);
+        }
+        if !app.mode.is_demo() {
+            let rep = crate::sys::recover_pending_quiet(&data_dir);
+            if !rep.is_clean() {
+                app.status_msg = Some(format!(
+                    "{}: {}",
+                    tr(&app.cfg.lang, "Восстановлено после сбоя", "Recovered after a crash"),
+                    rep.log.len()
+                ));
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = background::spawn(
+                std::time::Duration::from_secs(3600),
+                std::time::Duration::from_secs(300),
+                tx,
+            );
+            app.bg_rx = Some(rx);
+        }
         app.refresh_health();
         app
     }
@@ -211,6 +271,71 @@ impl App {
         self.svc_on = crate::modules::zapret::service_running()
             || crate::modules::detect::proc_running("winws.exe");
         self.tg_on = self.cfg.data_dir().join("mtproto.txt").exists();
+        let demo = self.mode.is_demo();
+        self.core.set(
+            Component::Bypass,
+            if demo || self.svc_on {
+                Phase::Running
+            } else {
+                Phase::Disabled
+            },
+            if demo || self.svc_on {
+                "обход запущен"
+            } else {
+                "обход выключен"
+            },
+            None,
+        );
+        self.core.set(
+            Component::Mtproto,
+            if demo {
+                Phase::Running
+            } else if !self.cfg.components.mtproto || !self.tg_on {
+                Phase::Disabled
+            } else {
+                Phase::Configured
+            },
+            if demo {
+                "демо: прокси готов"
+            } else if self.tg_on {
+                "прокси сохранён"
+            } else {
+                "прокси не настроен"
+            },
+            None,
+        );
+        let tgws = demo || crate::modules::detect::proc_running("TgWsProxy.exe");
+        self.core.set(
+            Component::Tgws,
+            if !self.cfg.components.tgws && !demo {
+                Phase::Disabled
+            } else if tgws {
+                Phase::Running
+            } else {
+                Phase::Configured
+            },
+            if tgws {
+                "мост запущен"
+            } else {
+                "мост не запущен"
+            },
+            None,
+        );
+        let subs = self.cfg.data_dir().join("subs_alive_plain.txt").exists();
+        self.core.set(
+            Component::Subscriptions,
+            if subs {
+                Phase::Configured
+            } else {
+                Phase::Disabled
+            },
+            if subs {
+                "список серверов есть"
+            } else {
+                "подписок нет"
+            },
+            None,
+        );
     }
 
     pub fn health(&self) -> Health {
@@ -259,31 +384,30 @@ impl App {
     }
 
     pub fn home_items(&self) -> Vec<HomeItem> {
-        let mut v = vec![
+        vec![
             HomeItem::Setup,
             HomeItem::Off,
+            HomeItem::Profiles,
             HomeItem::Check,
             HomeItem::Update,
-            HomeItem::Settings,
-        ];
-        if self.mode.is_dev() {
-            v.push(HomeItem::More);
-        }
-        v.push(HomeItem::Exit);
-        v
+            HomeItem::More,
+            HomeItem::Exit,
+        ]
     }
 
     pub fn adv_items(&self) -> Vec<AdvItem> {
+        let mut v = vec![
+            AdvItem::Health,
+            AdvItem::Components,
+            AdvItem::History,
+            AdvItem::Diagnostics,
+            AdvItem::Settings,
+        ];
         if self.mode.is_dev() {
-            vec![
-                AdvItem::Components,
-                AdvItem::Wizard,
-                AdvItem::Status,
-                AdvItem::Back,
-            ]
-        } else {
-            vec![AdvItem::Back]
+            v.push(AdvItem::Wizard);
         }
+        v.push(AdvItem::Back);
+        v
     }
 
     pub fn settings_items(&self) -> Vec<SetItem> {
@@ -331,6 +455,10 @@ impl App {
             Screen::Settings => "Settings",
             Screen::Update => "Update",
             Screen::Off => "Off",
+            Screen::Profiles => "Profiles",
+            Screen::ProfilePlan => "ProfilePlan",
+            Screen::ProfileEdit => "ProfileEdit",
+            Screen::History => "History",
         }
     }
 
@@ -351,16 +479,17 @@ impl App {
                 K::Enter => match self.home_items().get(self.home_idx).copied() {
                     Some(HomeItem::Setup) => self.begin_setup(),
                     Some(HomeItem::Check) => self.start_check(),
+                    Some(HomeItem::Profiles) => {
+                        self.profile_idx = 0;
+                        self.status_msg = None;
+                        self.screen = Screen::Profiles;
+                    }
                     Some(HomeItem::Update) => {
                         self.update_back = Screen::Home;
                         self.update_idx = 0;
                         self.screen = Screen::Update;
                     }
                     Some(HomeItem::Off) => self.screen = Screen::Off,
-                    Some(HomeItem::Settings) => {
-                        self.set_idx = 0;
-                        self.screen = Screen::Settings;
-                    }
                     Some(HomeItem::More) => {
                         self.adv_idx = 0;
                         self.screen = Screen::Advanced;
@@ -428,18 +557,29 @@ impl App {
                 K::Up => self.adv_idx = self.adv_idx.saturating_sub(1),
                 K::Down => self.adv_idx = (self.adv_idx + 1).min(self.adv_items().len() - 1),
                 K::Enter => match self.adv_items().get(self.adv_idx).copied() {
+                    Some(AdvItem::Health) => {
+                        self.start_check();
+                    }
                     Some(AdvItem::Components) => {
                         self.comp_cursor = 0;
                         self.screen = Screen::Components;
+                    }
+                    Some(AdvItem::History) => {
+                        self.history = History::load(&self.cfg.data_dir(), 200);
+                        self.screen = Screen::History;
+                    }
+                    Some(AdvItem::Diagnostics) => {
+                        self.status = build_status(&self.cfg);
+                        self.screen = Screen::Status;
+                    }
+                    Some(AdvItem::Settings) => {
+                        self.set_idx = 0;
+                        self.screen = Screen::Settings;
                     }
                     Some(AdvItem::Wizard) => {
                         self.steps = build_steps(&self.cfg);
                         self.step_i = 0;
                         self.screen = Screen::Wizard;
-                    }
-                    Some(AdvItem::Status) => {
-                        self.status = build_status(&self.cfg);
-                        self.screen = Screen::Status;
                     }
                     _ => self.screen = Screen::Home,
                 },
@@ -459,6 +599,21 @@ impl App {
                 _ => {}
             },
             Screen::Wizard => self.steps_key(code, false),
+            Screen::Profiles => self.profiles_key(code),
+            Screen::ProfilePlan => match code {
+                K::Enter | K::Char(' ') => self.apply_profile(),
+                K::Esc => {
+                    self.profile_plan = None;
+                    self.screen = Screen::Profiles;
+                }
+                _ => {}
+            },
+            Screen::ProfileEdit => self.profile_edit_key(code),
+            Screen::History => {
+                if matches!(code, K::Esc | K::Enter) {
+                    self.screen = Screen::Advanced;
+                }
+            }
             Screen::Status => {
                 if matches!(code, K::Esc | K::Enter) {
                     self.screen = Screen::Advanced;
@@ -493,6 +648,257 @@ impl App {
         } else {
             self.prelude_idx = 0;
             self.screen = Screen::Prelude;
+        }
+    }
+
+    fn profiles_key(&mut self, code: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode as K;
+        let n = self.profiles.profiles.len();
+        match code {
+            K::Up => self.profile_idx = self.profile_idx.saturating_sub(1),
+            K::Down => self.profile_idx = (self.profile_idx + 1).min(n.saturating_sub(1)),
+            K::Enter => {
+                if let Some(p) = self.profiles.profiles.get(self.profile_idx).cloned() {
+                    let changes = profiles::plan(&p, &self.current_profile());
+                    self.profile_plan = Some((p, changes));
+                    self.screen = Screen::ProfilePlan;
+                }
+            }
+            K::Char('n') | K::Char('N') => {
+                let base = self.current_profile();
+                let id = self.next_custom_id();
+                let p = Profile {
+                    id,
+                    name_ru: "Свой профиль".into(),
+                    name_en: "Custom profile".into(),
+                    description_ru: "Создан из текущих настроек".into(),
+                    description_en: "Created from the current settings".into(),
+                    bypass: base.bypass,
+                    dns: base.dns,
+                    hosts: base.hosts,
+                    mtproto: base.mtproto,
+                    tgws: base.tgws,
+                    subscriptions: base.subscriptions,
+                    client: base.client,
+                    autostart: base.autostart,
+                };
+                self.editing_profile = Some(p);
+                self.profile_edit_row = 0;
+                self.status_msg = None;
+                self.screen = Screen::ProfileEdit;
+            }
+            K::Char('e') | K::Char('E') => {
+                if let Some(mut p) = self.profiles.profiles.get(self.profile_idx).cloned() {
+                    // Built-ins are read-only: editing creates a custom copy.
+                    let builtin = profiles::builtins().iter().any(|b| b.id == p.id);
+                    if builtin {
+                        p.id = self.next_custom_id();
+                        p.name_ru = format!("{} (копия)", p.name_ru);
+                        p.name_en = format!("{} (copy)", p.name_en);
+                    }
+                    self.editing_profile = Some(p);
+                    self.profile_edit_row = 0;
+                    self.status_msg = None;
+                    self.screen = Screen::ProfileEdit;
+                }
+            }
+            K::Char('x') | K::Char('X') => {
+                if let Some(p) = self.profiles.profiles.get(self.profile_idx).cloned() {
+                    let dir = self.cfg.data_dir().join("profiles");
+                    if self.mode.is_demo() {
+                        self.status_msg = Some(tr(
+                            &self.cfg.lang,
+                            "Демо: экспорт не выполняется",
+                            "Demo: export is skipped",
+                        )
+                        .to_string());
+                    } else {
+                        match self.profiles.export(&p, &dir) {
+                            Ok(path) => {
+                                self.status_msg = Some(format!(
+                                    "{}: {}",
+                                    tr(&self.cfg.lang, "Сохранено", "Saved"),
+                                    path.display()
+                                ));
+                            }
+                            Err(e) => {
+                                self.status_msg = Some(format!(
+                                    "{}: {e:#}",
+                                    tr(&self.cfg.lang, "Ошибка экспорта", "Export failed")
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+            K::Char('i') | K::Char('I') => {
+                let path = self.cfg.data_dir().join("profiles").join("import.json");
+                let lang = self.cfg.lang.clone();
+                if self.mode.is_demo() {
+                    self.status_msg = Some(tr(&lang, "Демо: импорт не выполняется", "Demo: import is skipped").to_string());
+                } else {
+                    match std::fs::read_to_string(&path)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|t| self.profiles.import_str(&t))
+                    {
+                        Ok(p) => {
+                            let _ = self.profiles.save(&self.cfg.data_dir());
+                            self.status_msg = Some(format!(
+                                "{}: {}",
+                                tr(&lang, "Импортирован профиль", "Imported profile"),
+                                p.name(&lang)
+                            ));
+                            self.profile_idx = self
+                                .profiles
+                                .profiles
+                                .iter()
+                                .position(|x| x.id == p.id)
+                                .unwrap_or(0);
+                        }
+                        Err(e) => {
+                            self.status_msg = Some(format!(
+                                "{} {}: {e:#}",
+                                tr(&lang, "Положите файл", "Put the file"),
+                                path.display()
+                            ))
+                        }
+                    }
+                }
+            }
+            K::Esc => self.screen = Screen::Advanced,
+            _ => {}
+        }
+    }
+
+    fn profile_edit_key(&mut self, code: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode as K;
+        let Some(p) = self.editing_profile.as_mut() else {
+            self.screen = Screen::Profiles;
+            return;
+        };
+        match code {
+            K::Up => self.profile_edit_row = self.profile_edit_row.saturating_sub(1),
+            K::Down => {
+                self.profile_edit_row = (self.profile_edit_row + 1).min(PROFILE_ROWS - 1)
+            }
+            K::Left | K::Right | K::Char(' ') => match self.profile_edit_row {
+                0 => p.bypass = !p.bypass,
+                1 => p.dns = !p.dns,
+                2 => p.hosts = !p.hosts,
+                3 => p.mtproto = !p.mtproto,
+                4 => p.tgws = !p.tgws,
+                5 => p.subscriptions = !p.subscriptions,
+                6 => {
+                    p.client = match p.client.as_str() {
+                        "none" => "hiddify".into(),
+                        "hiddify" => "v2rayn".into(),
+                        "v2rayn" => "happ".into(),
+                        _ => "none".into(),
+                    }
+                }
+                7 => p.autostart = !p.autostart,
+                _ => {}
+            },
+            K::Enter => {
+                if self.profile_edit_row + 1 < PROFILE_ROWS {
+                    self.profile_edit_row += 1;
+                } else {
+                    let p = self.editing_profile.take().unwrap_or_default();
+                    match self.profiles.upsert(p.clone()).and_then(|_| {
+                        self.profiles.save(&self.cfg.data_dir())
+                    }) {
+                        Ok(()) => {
+                            self.status_msg = Some(format!(
+                                "{}: {}",
+                                tr(&self.cfg.lang, "Профиль сохранён", "Profile saved"),
+                                p.name(&self.cfg.lang)
+                            ));
+                            self.profile_idx = self
+                                .profiles
+                                .profiles
+                                .iter()
+                                .position(|x| x.id == p.id)
+                                .unwrap_or(0);
+                            self.screen = Screen::Profiles;
+                        }
+                        Err(e) => {
+                            self.status_msg = Some(format!(
+                                "{}: {e:#}",
+                                tr(&self.cfg.lang, "Не сохранено", "Not saved")
+                            ));
+                            self.editing_profile = Some(p);
+                        }
+                    }
+                }
+            }
+            K::Esc => {
+                self.editing_profile = None;
+                self.screen = Screen::Profiles;
+            }
+            _ => {}
+        }
+    }
+
+    fn next_custom_id(&self) -> String {
+        for n in 1..10_000 {
+            let id = format!("custom-{n}");
+            if self.profiles.get(&id).is_none() {
+                return id;
+            }
+        }
+        "custom".into()
+    }
+
+    pub fn current_profile(&self) -> Current {
+        let c = &self.cfg.components;
+        Current {
+            bypass: c.zapret,
+            dns: c.dns,
+            hosts: c.hosts,
+            mtproto: c.mtproto,
+            tgws: c.tgws,
+            subscriptions: c.subs,
+            client: self.cfg.client.clone(),
+            autostart: self.cfg.autostart,
+        }
+    }
+
+    fn apply_profile(&mut self) {
+        let Some((p, _)) = self.profile_plan.take() else {
+            self.screen = Screen::Profiles;
+            return;
+        };
+        self.cfg.components = Components {
+            zapret: p.bypass,
+            mtproto: p.mtproto,
+            tgws: p.tgws,
+            hosts: p.hosts,
+            subs: p.subscriptions,
+            dns: p.dns,
+        };
+        self.cfg.client = p.client.clone();
+        self.cfg.autostart = p.autostart;
+        self.cfg.service_mode = true;
+        self.persist();
+        self.record(
+            "profile",
+            format!("Применён профиль «{}»", p.name_ru),
+            format!("Applied profile \"{}\"", p.name_en),
+            true,
+        );
+        self.spawn_run();
+    }
+
+    fn record(&mut self, kind: &str, ru: impl Into<String>, en: impl Into<String>, ok: bool) {
+        if self.mode.is_demo() {
+            return;
+        }
+        let entry = HistoryEntry::new(kind, ru, en, ok);
+        if History::append(&self.cfg.data_dir(), entry.clone(), 200).is_ok() {
+            self.history.entries.push(entry);
+            if self.history.entries.len() > 200 {
+                self.history.entries.remove(0);
+            }
         }
     }
 
@@ -531,6 +937,165 @@ impl App {
         self.check_rx = Some(rx);
         self.check_items = None;
         self.screen = Screen::Check;
+    }
+
+    fn check_value(&self, needle: &str) -> Option<bool> {
+        self.check_items
+            .as_ref()?
+            .iter()
+            .find(|i| i.ru.contains(needle))
+            .map(|i| i.ok)
+    }
+
+    /// Projects raw check results into the core state and a staged diagnosis.
+    fn apply_checks_to_core(&mut self) {
+        let dns = self.check_value("DNS").or_else(|| self.check_value("Интернет"));
+        let youtube = self.check_value("YouTube");
+        let discord = self.check_value("Discord");
+        let telegram = self.check_value("Telegram");
+        let bypass = self.check_value("Обход");
+        let target = match (youtube, discord) {
+            (Some(a), Some(b)) => Some(a && b),
+            _ => None,
+        };
+        let tgws_running = self.mode.is_demo()
+            || detect::proc_running("TgWsProxy.exe");
+        let subs_present = self.cfg.data_dir().join("subs_alive_plain.txt").exists();
+        let signals = Signals {
+            dns_ok: dns,
+            // A failed name lookup makes later TCP/TLS results meaningless.
+            tcp_ok: if dns == Some(false) { None } else { target },
+            // The current probes do not perform a separate TLS handshake.
+            tls_ok: None,
+            // And they do not speak the proxy protocol, so never claim it.
+            protocol_ok: None,
+            proxy_configured: self.cfg.components.mtproto || self.cfg.components.tgws,
+            proxy_running: self.tg_on,
+            proxy_verified: self.tg_on && telegram == Some(true),
+            bypass_running: self.svc_on,
+            mtproto_ready: self.tg_on,
+            tgws_running,
+            subscriptions_present: subs_present,
+            client_installed: !self.cfg.client.is_empty() && self.cfg.client != "none",
+            target_ok: target,
+            admin: util::is_admin(),
+        };
+        let report = health::evaluate(&signals, crate::state::now_secs());
+
+        self.core.set(
+            Component::Dns,
+            match dns {
+                Some(true) => Phase::Operational,
+                Some(false) => Phase::Failed,
+                None => Phase::Unknown,
+            },
+            match dns {
+                Some(true) => "имена определяются",
+                Some(false) => "DNS не отвечает",
+                None => "не проверялось",
+            },
+            None,
+        );
+        self.core.set(
+            Component::Bypass,
+            match (self.svc_on, bypass, target) {
+                (false, _, _) => Phase::Disabled,
+                (true, Some(false), _) => Phase::Failed,
+                (true, _, Some(false)) => Phase::Degraded,
+                (true, _, Some(true)) => Phase::Operational,
+                _ => Phase::Running,
+            },
+            if self.svc_on {
+                "обход запущен"
+            } else {
+                "обход выключен"
+            },
+            None,
+        );
+        self.core.set(
+            Component::Mtproto,
+            match (self.cfg.components.mtproto, self.tg_on, telegram) {
+                (false, _, _) => Phase::Disabled,
+                (true, false, _) => Phase::Disabled,
+                (true, true, Some(false)) => Phase::Degraded,
+                (true, true, Some(true)) => Phase::Operational,
+                (true, true, None) => Phase::Configured,
+            },
+            if self.tg_on {
+                "прокси сохранён"
+            } else {
+                "прокси не настроен"
+            },
+            None,
+        );
+        self.core.set(
+            Component::Tgws,
+            if !self.cfg.components.tgws {
+                Phase::Disabled
+            } else if tgws_running {
+                Phase::Running
+            } else {
+                Phase::Configured
+            },
+            if tgws_running {
+                "мост запущен"
+            } else {
+                "мост не запущен"
+            },
+            None,
+        );
+        self.core.set(
+            Component::Subscriptions,
+            if subs_present {
+                Phase::Configured
+            } else {
+                Phase::Disabled
+            },
+            if subs_present {
+                "список серверов есть"
+            } else {
+                "подписки не настроены"
+            },
+            None,
+        );
+        self.core.set(
+            Component::Client,
+            if signals.client_installed {
+                Phase::Installed
+            } else {
+                Phase::Disabled
+            },
+            if signals.client_installed {
+                "приложение выбрано"
+            } else {
+                "приложение не нужно"
+            },
+            None,
+        );
+        self.core.set(
+            Component::Update,
+            Phase::Configured,
+            if self.update_due() {
+                "пора обновить"
+            } else {
+                "обновления по расписанию"
+            },
+            None,
+        );
+
+        self.health_report = Some(report);
+        let total = self.check_items.as_ref().map(|i| i.len()).unwrap_or(0);
+        let ok = self
+            .check_items
+            .as_ref()
+            .map(|i| i.iter().filter(|x| x.ok).count())
+            .unwrap_or(0);
+        self.record(
+            "check",
+            format!("Проверка сети: {ok} из {total}"),
+            format!("Network check: {ok} of {total}"),
+            ok == total,
+        );
     }
 
     fn settings_key(&mut self, code: crossterm::event::KeyCode) {
@@ -967,6 +1532,18 @@ impl App {
                 None => {
                     self.last_ok = ok;
                     self.refresh_health();
+                    let (ru, en) = if self.off_run {
+                        (
+                            if ok { "Выключено, настройки возвращены" } else { "Выключено частично" },
+                            if ok { "Turned off, settings restored" } else { "Partially turned off" },
+                        )
+                    } else {
+                        (
+                            if ok { "Включено: настройка завершена" } else { "Настройка завершилась с ошибками" },
+                            if ok { "Turned on: setup finished" } else { "Setup finished with errors" },
+                        )
+                    };
+                    self.record(if self.off_run { "off" } else { "setup" }, ru, en, ok);
                     self.screen = Screen::Result;
                 }
             }
@@ -976,7 +1553,32 @@ impl App {
             if let Ok(items) = rx.try_recv() {
                 self.check_items = Some(items);
                 self.check_rx = None;
+                self.apply_checks_to_core();
             }
+        }
+
+        let mut health_tick = false;
+        let mut update_tick = false;
+        if let Some(rx) = &self.bg_rx {
+            while let Ok(t) = rx.try_recv() {
+                match t {
+                    Tick::HealthDue => health_tick = true,
+                    Tick::UpdateDue => update_tick = true,
+                }
+            }
+        }
+        if health_tick {
+            self.refresh_health();
+        }
+        if update_tick && self.update_due() {
+            self.status_msg = Some(
+                tr(
+                    &self.cfg.lang,
+                    "Пора обновить подписки — пункт «Обновить»",
+                    "Subscriptions are due - see \"Update\"",
+                )
+                .to_string(),
+            );
         }
     }
 }
