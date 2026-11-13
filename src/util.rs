@@ -329,6 +329,43 @@ pub fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Restarts the current exe elevated through the UAC prompt.
+/// `Ok(())` means a new process was started and the caller should exit.
+pub fn relaunch_elevated(extra: &[String]) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let params = extra
+        .iter()
+        .map(|a| {
+            if a.contains(' ') || a.contains('"') {
+                format!("\"{}\"", a.replace('"', "\\\""))
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let op = wide("runas");
+    let file = wide(&exe.to_string_lossy());
+    let params = wide(&params);
+    let dir = wide(&dir.to_string_lossy());
+    let rc = unsafe {
+        ShellExecuteW(
+            0,
+            op.as_ptr(),
+            file.as_ptr(),
+            params.as_ptr(),
+            dir.as_ptr(),
+            1,
+        )
+    };
+    if rc > 32 {
+        return Ok(());
+    }
+    anyhow::bail!("UAC отменён или недоступен (код {rc})")
+}
+
 pub fn reg_set_string(root: &str, path: &str, name: &str, value: &str) -> Result<()> {
     let out = hidden_str(
         "reg",

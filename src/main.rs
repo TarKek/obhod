@@ -68,6 +68,14 @@ fn main() {
         }
         return;
     }
+    if args.iter().any(|a| a == "--update-now") {
+        match selfupdate::check_and_apply(&["--version".to_string()]) {
+            Ok(true) => return,
+            Ok(false) => println!("обновлений нет ({})", selfupdate::current_version()),
+            Err(e) => eprintln!("obhod: обновление не удалось: {e:#}"),
+        }
+        return;
+    }
     if let Some(pos) = args.iter().position(|a| a == "--parse-bat") {
         if let Some(path) = args.get(pos + 1) {
             let p = std::path::PathBuf::from(path);
@@ -79,6 +87,18 @@ fn main() {
             }
         }
         return;
+    }
+
+    if !mode.is_demo() && !util::is_admin() && !args.iter().any(|a| a == "--elevated" || a == "--no-elevate") {
+        let mut extra = args.clone();
+        extra.push("--elevated".to_string());
+        match util::relaunch_elevated(&extra) {
+            Ok(()) => return,
+            Err(e) => {
+                logger::info(format!("запуск без прав администратора: {e:#}"));
+                eprintln!("obhod: без прав администратора часть действий будет недоступна");
+            }
+        }
     }
 
     if !args.iter().any(|a| a == "--no-update") {
