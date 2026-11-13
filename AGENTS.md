@@ -1,0 +1,89 @@
+# AGENTS.md — obhod
+
+TUI-утилита (Windows x64) для бесплатного обхода блокировок: zapret, MTProto-прокси,
+TgWsProxy, hosts, VLESS-подписки, DNS/DoH. Один `.exe`, без установки.
+
+## Стек и сборка
+
+- Rust 2021, Windows-only (Win32 API через `extern "system"`), `ratatui 0.29` + `crossterm 0.28`.
+- `cargo build --release` → `target\release\obhod.exe`; `.\build.ps1` копирует в `dist\obhod.exe`.
+- `cargo build` пишет в stderr: в PS 5.1 с `$ErrorActionPreference='Stop'` это ломает скрипт — в `build.ps1` EAP на время сборки понижается.
+- Зависимости только: ratatui, crossterm, reqwest(rustls, blocking), serde/serde_json, zip, anyhow. Новые не добавлять без причины (важна портативность и размер).
+
+## Карта кода
+
+| Файл | Назначение |
+|---|---|
+| `src/main.rs` | CLI-флаги, `--demo-static` (рендер экранов в текст), цикл событий |
+| `src/app.rs` | `App`, `Screen`, `StepKind`, вся логика клавиш, `build_simple`/`build_steps`, `friendly_stage` |
+| `src/ui.rs` | отрисовка всех экранов (`draw_*`), хелперы `block()`, `choice_line()` |
+| `src/util.rs` | Win32 (диск, admin, ShellExecuteW), HTTP, GitHub-ассеты, zip, clipboard |
+| `src/worker.rs` | фоновые потоки (`Msg::Log/Progress/Done`), демо-воркеры |
+| `src/config.rs` | `Config`/`Components`, `obhod.json` рядом с exe |
+| `src/brand.rs` | бренд: `brand.json` (название, подпись, вид серверов, цвета палитры) |
+| `src/state.rs`, `logger.rs` | версии/даты, лог `data\obhod.log` |
+| `src/selfupdate.rs` | автообновление exe из GitHub Releases (`TarKek/obhod`) |
+| `src/modules/*` | по одному модулю на компонент; `mod.rs::run_all` — порядок запуска; `off.rs` — выключение/откат |
+
+## Инварианты и правила
+
+- **Язык интерфейса**: каждая строка через `tr(lang, ru, en)`. Русский — основной.
+  Термины (DPI, MTProto, DoH, VLESS) — только в «Тонкой настройке».
+- **UI-стиль один на всё приложение**: меню — однострочные пункты
+  (`▶` + название, описание в колонке справа серым); при выборе вся строка
+  заливается `accent`, текст — `on_accent`. Заголовки блоков — `block()`:
+  скруглённые рамки, тихая рамка, светлый заголовок. Не делать отдельные
+  «мастера» с иным оформлением: формы — `choice_line`, списки — как `draw_home`.
+- **Бренд и цвета — только через `brand`**: никаких литералов `Color::*` и
+  «obhod» в UI/подписях. Название — `brand::name()`, цвета — `brand::accent()`,
+  `on_accent()`, `ok()`, `warn()`, `err()`, `muted()`, `secondary()`, `text()`,
+  имя сервера — `brand::server_name()`. Всё это читается из `brand.json` рядом с
+  exe (создаётся автоматически).
+- **Навигация**: `↑/↓` — перемещение, `←/→`/`Space` — смена значения, `Enter` —
+  далее/применить, `Esc` — назад. В текстовых полях — обычный ввод.
+- **Режимы**: `-m/--mode normal|demo|dev` (`--demo`/`--dev` — алиасы). `normal` —
+  только главное меню; `demo` — всё видно, ядро ничего не меняет; `dev` — всё
+  видно, действия реальные. Не добавлять технические экраны в normal.
+- **Согласие пользователя**: ничего не устанавливать без явного `Enter` на шаге
+  «Готово — включить?». На этом шаге показывать `simple_summary`.
+- **Портативность**: ничего вне папки exe, кроме службы/автозагрузки (реестр
+  `HKCU\...\Run`) — и только по явному согласию пользователя.
+- **Ничего не перезаписывать** без согласия: `detect::scan` → экран Prelude.
+- **Windows-команды** запускать через `util::hidden*` с `CREATE_NO_WINDOW`, иначе
+  мигают консольные окна.
+- **Открытие URL/URI** — только `util::open_url` (ShellExecuteW). `cmd /c start`
+  нельзя: cmd режет аргумент по `&` (так ломался `tg://proxy`).
+- **Подписка для VPN-клиентов** — только `vless://`/`trojan://`/`vmess://` из
+  `subs_alive_plain.txt`. `tg://` (MTProto) в неё не подставлять: Happ/Hiddify/
+  v2rayN покажут пустой профиль. Раздача — `servesub` (base64 по `/sub`, plain
+  по `/sub.txt`, без `#`-комментариев), плюс файлы в `data\import\`.
+- **Отбор узлов**: 2 самых быстрых на страну, имя `🇩🇪 | Германия | obhod`
+  (`subs.rs::brand_name`/`rename_link`). Страны — ip-api.com (`lang=ru`); если
+  сервис недоступен, ничего не фильтруется. Локальная ссылка живёт только пока
+  obhod открыт, поэтому всегда показывай пользователю шаг «Ctrl+V» и файлы.
+- Ошибки модуля не валят весь прогон: `run_all` логирует `⚠` и идёт дальше.
+
+## Проверка без реальных действий
+
+```
+cargo build --release
+cargo test --release                      # юнит-тесты (vmess/base64/URL-парсер)
+.\target\release\obhod.exe --demo-static   # все экраны текстом, 100x30
+.\target\release\obhod.exe --demo          # интерактивное демо
+.\target\release\obhod.exe --selftest      # окружение/права/диск/обнаружение
+```
+
+`--demo` и `--demo-static` ничего не меняют в системе. Любую правку UI
+проверять через `--demo-static` (смотреть блок `SIMPLE`/`PRELUDE`).
+
+## Известные особенности
+
+- Трея нет; `--minimized` принимается, но окно всё равно открывается.
+- Парсер подписок — `vless://`, `trojan://`, `vmess://` (без SS/Hysteria).
+- MTProto-прокси проверяются только TCP-коннектом с вашего IP; секрет
+  валидируется (`telegram.rs::valid_secret`), иначе Telegram скажет «неверный прокси».
+- Telegram открывается лучшим прокси автоматически — это ожидаемое поведение, не баг.
+
+## Журнал решений и текущее состояние
+
+См. `NOTES.md`. При существенных правках дописывать туда короткую запись (дата, что, почему).
