@@ -1609,6 +1609,7 @@ impl App {
             keep_client,
             client: self.cfg.client.clone(),
             client_dir: PathBuf::from(&self.cfg.client_dir),
+            sub_port: self.cfg.sub_port,
         }
     }
 
@@ -2187,6 +2188,7 @@ pub(crate) fn build_status(cfg: &Config) -> Vec<String> {
         keep_client: false,
         client: cfg.client.clone(),
         client_dir: PathBuf::from(default_client_dir(cfg)),
+        sub_port: cfg.sub_port,
     };
     let (tx, _rx) = std::sync::mpsc::channel();
     let ctx = crate::modules::Ctx {

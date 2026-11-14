@@ -33,13 +33,38 @@ static URL_PLAIN: OnceLock<Option<String>> = OnceLock::new();
 
 /// Starts the process-wide subscription server once. Returns the base64 URL.
 /// The plain-text URL is available through [`urls`].
-pub fn start(path: PathBuf, title: &str) -> Option<String> {
+///
+/// `port` is fixed when possible so the URL does not change between launches;
+/// `token` should come from [`stable_token`] for the same reason.
+pub fn start(path: PathBuf, title: &str, port: u16, token: Option<String>) -> Option<String> {
     URL.get_or_init(|| {
-        let server = start_detached(ServerConfig::new(path, title))?;
+        let mut cfg = ServerConfig::new(path, title);
+        cfg.port = Some(port);
+        cfg.token = token;
+        let server = start_detached(cfg)?;
         let _ = URL_PLAIN.set(Some(server.url_plain.clone()));
         Some(server.url.clone())
     })
     .clone()
+}
+
+/// Reads (or creates once) a persistent access token for the local server.
+/// Keeping it in `data\` is what makes the imported subscription URL stable.
+pub fn stable_token(data_dir: &std::path::Path) -> String {
+    let path = data_dir.join("servesub.token");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let t = text.trim().to_string();
+        if t.len() == 32 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+            return t;
+        }
+    }
+    let token = new_token();
+    let _ = std::fs::create_dir_all(data_dir);
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &token).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+    token
 }
 
 /// Both URLs of the process-wide server (`base64`, `plain`).
@@ -56,6 +81,8 @@ pub struct ServerConfig {
     pub title: String,
     /// Fixed token for tests; random when `None`.
     pub token: Option<String>,
+    /// Preferred loopback port; a free ephemeral port when `None`.
+    pub port: Option<u16>,
     pub max_connections: usize,
 }
 
@@ -65,6 +92,7 @@ impl ServerConfig {
             path,
             title: title.into(),
             token: None,
+            port: None,
             max_connections: DEFAULT_MAX_CONNECTIONS,
         }
     }
@@ -102,7 +130,18 @@ struct Shared {
 
 /// Starts the server on loopback. Used by [`start`] and by tests.
 pub fn start_with(cfg: ServerConfig) -> Option<Server> {
-    let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+    let listener = match cfg.port {
+        Some(p) => match TcpListener::bind(("127.0.0.1", p)) {
+            Ok(l) => l,
+            Err(e) => {
+                crate::logger::info(format!(
+                    "servesub: порт {p} занят ({e}), беру свободный — ссылка изменится"
+                ));
+                TcpListener::bind("127.0.0.1:0").ok()?
+            }
+        },
+        None => TcpListener::bind("127.0.0.1:0").ok()?,
+    };
     listener.set_nonblocking(true).ok()?;
     let port = listener.local_addr().ok()?.port();
     let token = cfg.token.unwrap_or_else(new_token);
@@ -587,6 +626,48 @@ mod tests {
             body(&get(srv.port, &format!("/sub.txt/{TOKEN}"))),
             "vless://b\n"
         );
+    }
+
+    #[test]
+    fn stable_token_survives_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = stable_token(dir.path());
+        assert_eq!(first.len(), 32);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(stable_token(dir.path()), first);
+        assert!(dir.path().join("servesub.token").exists());
+    }
+
+    #[test]
+    fn preferred_port_is_used_when_free() {
+        // Ask the OS for a free port, release it, then claim it explicitly.
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subscription.txt");
+        std::fs::write(&path, "vless://a\n").unwrap();
+        let mut cfg = ServerConfig::new(path, "t");
+        cfg.token = Some(TOKEN.to_string());
+        cfg.port = Some(port);
+        let srv = start_with(cfg).unwrap();
+        assert_eq!(srv.port, port);
+        assert!(srv.url.contains(&format!(":{port}/")));
+    }
+
+    #[test]
+    fn busy_port_falls_back_instead_of_failing() {
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let busy = held.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subscription.txt");
+        std::fs::write(&path, "vless://a\n").unwrap();
+        let mut cfg = ServerConfig::new(path, "t");
+        cfg.token = Some(TOKEN.to_string());
+        cfg.port = Some(busy);
+        let srv = start_with(cfg).unwrap();
+        assert_ne!(srv.port, busy);
+        assert!(status(&get(srv.port, &format!("/sub/{TOKEN}"))) == 200);
     }
 
     #[test]

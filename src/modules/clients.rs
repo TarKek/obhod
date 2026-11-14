@@ -201,7 +201,12 @@ pub fn prepare_subscription(ctx: &Ctx) -> Result<()> {
     let b64_file = import_dir.join(format!("{slug}_base64.txt"));
     std::fs::write(&b64_file, util::base64(&body))?;
 
-    if let Some(url) = servesub::start(sub_path.clone(), crate::brand::name()) {
+    if let Some(url) = servesub::start(
+        sub_path.clone(),
+        crate::brand::name(),
+        ctx.opts.sub_port,
+        Some(servesub::stable_token(&ctx.data)),
+    ) {
         util::set_clipboard(&url);
         ctx.log("✓ Ссылка на подписку скопирована в буфер обмена.");
         ctx.log(format!("  {}", import_hint(app)));

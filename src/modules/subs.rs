@@ -23,7 +23,7 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::modules::Ctx;
 use crate::net::links::{self, LinkInfo};
@@ -35,7 +35,22 @@ const DEFAULT_SOURCES: &[&str] = &[
     "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/server.txt",
     "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
     "https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/mix",
+    "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt",
+    "https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/vless",
+    "https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/trojan",
+    "https://raw.githubusercontent.com/MhdiTaheri/V2rayCollector/main/sub/vmess",
+    "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",
+    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
+    "https://raw.githubusercontent.com/ts-sf/fly/main/v2",
+    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/V2RAY_RAW.txt",
+    "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt",
+    // CDN mirrors: raw.githubusercontent.com can be blocked while jsDelivr works.
+    "https://cdn.jsdelivr.net/gh/barry-far/V2ray-Config@main/All_Configs_Sub.txt",
+    "https://cdn.jsdelivr.net/gh/ALIILAPRO/v2rayNG-Config@main/server.txt",
 ];
+/// How many links we take from one source before dedupe. Keeps a huge mirror
+/// from crowding out the rest of the list.
+const PER_SOURCE: usize = 64;
 const MAX_TEST: usize = 420;
 const THREADS: usize = 80;
 const PER_COUNTRY: usize = 2;
@@ -71,21 +86,40 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     }
 
     let mut fetched: Vec<String> = Vec::new();
+    let started = Instant::now();
+    let mut skipped = 0usize;
     for src in &sources {
+        // Many mirrors exist: do not spend the whole setup on one slow host.
+        if started.elapsed() > Duration::from_secs(90) {
+            skipped += 1;
+            continue;
+        }
         match fetch_source(&client, src) {
             Ok(body) => {
                 let body = maybe_b64(&body);
                 let links = collect_links(&body);
                 stats.sources_ok += 1;
                 stats.fetched += links.len();
-                ctx.log(format!("{} — {} конфигов", short(src), links.len()));
-                fetched.extend(links);
+                if links.len() > PER_SOURCE {
+                    ctx.log(format!(
+                        "{} — {} конфигов, беру первые {}",
+                        short(src),
+                        links.len(),
+                        PER_SOURCE
+                    ));
+                }
+                fetched.extend(links.into_iter().take(PER_SOURCE));
             }
             Err(e) => {
                 stats.sources_failed += 1;
                 ctx.log(format!("⚠ {} — {e}", short(src)));
             }
         }
+    }
+    if skipped > 0 {
+        ctx.log(format!(
+            "⚠ {skipped} источников пропущено: не уложились в 90 секунд"
+        ));
     }
 
     let batch = dedupe_and_filter(fetched);

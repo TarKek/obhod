@@ -374,6 +374,7 @@ fn selftest() {
             keep_client: true,
             client: cfg.client.clone(),
             client_dir: std::path::PathBuf::from(&cfg.client_dir),
+            sub_port: cfg.sub_port,
         },
         tx: {
             let (tx, _rx) = std::sync::mpsc::channel();

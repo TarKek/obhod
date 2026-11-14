@@ -32,6 +32,7 @@ pub struct RunOptions {
     pub keep_client: bool,
     pub client: String,
     pub client_dir: PathBuf,
+    pub sub_port: u16,
 }
 
 type StepFn = fn(&Ctx) -> Result<()>;
@@ -111,5 +112,6 @@ pub fn prepare(cfg: &Config) -> Result<RunOptions> {
         keep_client: true,
         client: cfg.client.clone(),
         client_dir: PathBuf::from(&cfg.client_dir),
+        sub_port: cfg.sub_port,
     })
 }

@@ -49,6 +49,12 @@ impl Default for Components {
     }
 }
 
+/// Default loopback port for the local subscription server. Uncommon on
+/// purpose: it must not collide with a typical dev server or another app.
+fn default_sub_port() -> u16 {
+    45871
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
@@ -69,6 +75,10 @@ pub struct Config {
     pub repo: String,
     pub client: String,
     pub client_dir: String,
+    /// Loopback port of the local subscription server. Kept stable so the URL
+    /// imported into a VPN client keeps working across restarts.
+    #[serde(default = "default_sub_port")]
+    pub sub_port: u16,
     pub last_found: Vec<String>,
 }
 
@@ -90,6 +100,7 @@ impl Default for Config {
             repo: String::new(),
             client: "hiddify".into(),
             client_dir: String::new(),
+            sub_port: default_sub_port(),
             last_found: Vec::new(),
         }
     }
@@ -312,6 +323,7 @@ mod tests {
         assert_eq!(cfg.version, CONFIG_VERSION);
         assert_eq!(cfg.lang, "ru");
         assert!(cfg.components.dns);
+        assert_eq!(cfg.sub_port, 45871);
     }
 
     #[test]
