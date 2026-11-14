@@ -272,10 +272,7 @@ impl Filter {
                 _ => return false,
             }
         }
-        if !self.include_cooling && node.is_cooling(now) {
-            return false;
-        }
-        true
+        self.include_cooling || !node.is_cooling(now)
     }
 }
 
