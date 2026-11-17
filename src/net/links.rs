@@ -10,8 +10,8 @@
 //!   need their own client and are marked `external` (we do not implement
 //!   Shadowsocks/Hysteria2/TUIC handshakes from scratch).
 //! - `tg://proxy` and `https://t.me/proxy` — MTProto proxies; the secret is
-//!   format-checked (16/17-byte hex or base64), the MTProto handshake itself
-//!   is not implemented.
+//!   format-checked (16-byte, `dd`-padded or `ee`+domain hex/base64url); the
+//!   MTProto handshake itself is not implemented.
 //!
 //! Secrets never leave this module: [`LinkInfo`] stores only a hashed key,
 //! so debug output and logs cannot leak passwords or UUIDs.
@@ -738,35 +738,56 @@ fn parse_mtproto_fields(
     })
 }
 
-/// Telegram accepts a 16-byte secret as 32 hex chars, a 17-byte `dd`/`ee`
-/// prefixed secret as 34 hex chars, or base64 that decodes to >= 16 bytes.
-/// Returns the normalized form (hex stays hex, base64 becomes hex) so links
-/// can be rebuilt without duplicates.
+/// Matches Telegram Desktop's current MTProto secret rules:
+/// - a 16-byte secret;
+/// - a 17-byte `dd`-padded secret;
+/// - an `ee` TLS secret of at least 21 bytes (16-byte key plus a domain).
+///
+/// Hex and base64url input are normalized to hex.
 pub fn normalize_mtproto_secret(raw: &str) -> Option<String> {
     let s = percent_decode(raw).trim().to_string();
     if s.is_empty() {
         return None;
     }
-    if s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Some(s.to_ascii_lowercase());
-    }
-    if s.len() == 34 {
-        let low = s.to_ascii_lowercase();
-        if (low.starts_with("dd") || low.starts_with("ee"))
-            && low[2..].bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Some(low);
-        }
-    }
-    let bytes = b64_decode(&s)?;
-    if bytes.len() >= 16 {
+
+    let valid = |bytes: &[u8]| {
+        bytes.len() == 16
+            || (bytes.len() == 17 && bytes[0] == 0xdd)
+            || (bytes.len() >= 21 && bytes[0] == 0xee)
+    };
+    let to_hex = |bytes: &[u8]| {
         let mut hex = String::with_capacity(bytes.len() * 2);
         for b in bytes {
             hex.push_str(&format!("{b:02x}"));
         }
-        return Some(hex);
+        hex
+    };
+
+    // Check hex before base64: a long hex TLS secret also consists entirely
+    // of valid base64 characters, but decoding it as base64 corrupts it.
+    if s.len() >= 32 && s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let bytes: Option<Vec<u8>> = (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+            .collect();
+        let bytes = bytes?;
+        return valid(&bytes).then(|| s.to_ascii_lowercase());
     }
-    None
+
+    // Telegram accepts base64url, not arbitrary base64-like strings.
+    let inner = s.trim_end_matches('=');
+    if s.len() < 22
+        || s.len() % 4 == 1
+        || s.len() - inner.len() > 2
+        || inner.contains('=')
+        || !inner
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    let bytes = b64_decode(&s)?;
+    valid(&bytes).then(|| to_hex(&bytes))
 }
 
 /// True for a canonical UUID (any version) or 32 bare hex chars.
@@ -904,12 +925,18 @@ mod tests {
     }
 
     #[test]
-    fn mtproto_secret_formats() {
+    fn mtproto_secret_formats_match_current_telegram() {
         assert!(normalize_mtproto_secret("0123456789abcdef0123456789abcdef").is_some());
         assert!(normalize_mtproto_secret("dd0123456789abcdef0123456789abcdef").is_some());
-        assert!(normalize_mtproto_secret("ee0123456789abcdef0123456789abcdef").is_some());
+        // Current Telegram Desktop rejects a bare 17-byte ee secret as an
+        // unsupported proxy type; TLS secrets must include a domain.
+        assert!(normalize_mtproto_secret("ee0123456789abcdef0123456789abcdef").is_none());
+        let tls = "ee0123456789abcdef0123456789abcdef7777772e676f6f676c652e636f6d";
+        assert_eq!(normalize_mtproto_secret(tls).as_deref(), Some(tls));
+        assert!(normalize_mtproto_secret("ee0123456789abcdef0123456789abcdef676f6f").is_none());
+        assert!(normalize_mtproto_secret("00123456789abcdef0123456789abcdef").is_none());
         assert!(normalize_mtproto_secret("0123456789abcde").is_none());
-        // 16 bytes base64 (standard alphabet)
+        // 16 bytes base64url (standard alphabet overlaps for this value).
         let b64 = crate::util::base64("\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\u{9}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}");
         let norm = normalize_mtproto_secret(&b64).unwrap();
         assert_eq!(norm, "01020304050607080910111213141516");

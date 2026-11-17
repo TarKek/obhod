@@ -322,6 +322,14 @@ mod tests {
         let b64 = util::base64("\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\u{9}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}");
         let c = parse_link(&format!("tg://proxy?server=h&port=1&secret={b64}")).unwrap();
         assert_eq!(c.secret, "01020304050607080910111213141516");
+
+        let tls = "ee0123456789abcdef0123456789abcdef7777772e676f6f676c652e636f6d";
+        let d = parse_link(&format!("tg://proxy?server=h&port=443&secret={tls}")).unwrap();
+        assert_eq!(d.secret, tls);
+        assert!(parse_link(
+            "tg://proxy?server=h&port=443&secret=ee0123456789abcdef0123456789abcdef"
+        )
+        .is_none());
     }
 
     #[test]
@@ -360,9 +368,14 @@ mod tests {
     }
 
     #[test]
-    fn valid_secret_accepts_what_telegram_accepts() {
+    fn valid_secret_accepts_only_current_telegram_formats() {
         assert!(valid_secret("0123456789abcdef0123456789abcdef").is_some());
-        assert!(valid_secret("ee0123456789abcdef0123456789abcdef").is_some());
+        assert!(valid_secret("dd0123456789abcdef0123456789abcdef").is_some());
+        assert!(valid_secret("ee0123456789abcdef0123456789abcdef").is_none());
+        assert!(
+            valid_secret("ee0123456789abcdef0123456789abcdef7777772e676f6f676c652e636f6d")
+                .is_some()
+        );
         assert!(valid_secret("0123456789").is_none());
         assert!(valid_secret("%30%31%32%33%34%35%36%37%38%39abcdef0123456789abcdef").is_some());
     }
