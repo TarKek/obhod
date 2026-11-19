@@ -212,7 +212,26 @@ pub fn run(ctx: &Ctx) -> Result<()> {
     if let Err(e) = util::open_url(&best.proxy.link()) {
         ctx.log(format!("⚠ не удалось открыть ссылку: {e}"));
     }
+    ctx.log("Если Telegram не принял прокси: «Обновить» → «Другой прокси».");
     Ok(())
+}
+
+/// Proxies from `mtproto.txt`, fastest first, without duplicates.
+///
+/// This is exactly the order the update run wrote, so the fallback action can
+/// offer "the next one" without probing again.
+pub fn ranked(data: &std::path::Path) -> Vec<MtProxy> {
+    let Ok(text) = std::fs::read_to_string(data.join("mtproto.txt")) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    text.lines()
+        .filter_map(|l| {
+            let i = l.find("tg://proxy")?;
+            parse_link(&l[i..])
+        })
+        .filter(|p| seen.insert(p.key()))
+        .collect()
 }
 
 fn short(s: &str) -> String {
@@ -378,5 +397,24 @@ mod tests {
         );
         assert!(valid_secret("0123456789").is_none());
         assert!(valid_secret("%30%31%32%33%34%35%36%37%38%39abcdef0123456789abcdef").is_some());
+    }
+
+    #[test]
+    fn ranked_keeps_file_order_and_skips_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = "tg://proxy?server=a.example&port=443&secret=0123456789abcdef0123456789abcdef";
+        let b = "tg://proxy?server=b.example&port=443&secret=dd0123456789abcdef0123456789abcdef";
+        std::fs::write(
+            dir.path().join("mtproto.txt"),
+            format!("# MTProto, проверено test\n12 ms  {b}\n999 ms  {a}\n# only comments\n"),
+        )
+        .unwrap();
+
+        let list = ranked(dir.path());
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].server, "b.example");
+        assert_eq!(list[1].server, "a.example");
+
+        assert!(ranked(&dir.path().join("missing")).is_empty());
     }
 }

@@ -7,7 +7,7 @@ use crate::core::health::{self, HealthReport, Signals};
 use crate::core::history::{History, HistoryEntry};
 use crate::core::profiles::{self, Change, Current, Profile, ProfileStore};
 use crate::core::state::{Component, CoreState, Phase};
-use crate::modules::{detect, RunOptions};
+use crate::modules::{detect, telegram, RunOptions};
 use crate::net::manager::{self, FailoverPolicy, Filter, Node, NodeStore, Ranking, Role};
 use crate::util;
 use crate::worker::{self, Msg};
@@ -132,6 +132,8 @@ pub struct App {
     /// Last known state of the real system, refreshed on start and after actions.
     pub svc_on: bool,
     pub tg_on: bool,
+    /// Next index in `mtproto.txt` for the "another proxy" action.
+    pub tg_next: usize,
     /// The current background run is "turn off / roll back".
     pub off_run: bool,
     /// Where the update screen returns on Esc (Home or Advanced).
@@ -220,6 +222,7 @@ impl App {
             mode,
             svc_on: false,
             tg_on: false,
+            tg_next: 0,
             off_run: false,
             update_back: Screen::Home,
             home_idx: 0,
@@ -674,11 +677,12 @@ impl App {
             Screen::Settings => self.settings_key(code),
             Screen::Update => match code {
                 K::Up => self.update_idx = self.update_idx.saturating_sub(1),
-                K::Down => self.update_idx = (self.update_idx + 1).min(3),
+                K::Down => self.update_idx = (self.update_idx + 1).min(4),
                 K::Enter => match self.update_idx {
                     0 => self.start_update(worker::UpdateMode::Proxy),
                     1 => self.start_update(worker::UpdateMode::Subs),
                     2 => self.start_update(worker::UpdateMode::Tools),
+                    3 => self.open_next_proxy(),
                     _ => self.screen = self.update_back,
                 },
                 K::Esc => self.screen = self.update_back,
@@ -1635,6 +1639,55 @@ impl App {
             worker::spawn_update(opts, mode)
         });
         self.screen = Screen::Progress;
+    }
+
+    /// Opens the next proxy from `data\mtproto.txt`.
+    ///
+    /// Telegram cannot tell us that it rejected a proxy, so this is the manual
+    /// fallback: the list is already ordered by latency, and repeated calls
+    /// cycle through the three fastest links.
+    fn open_next_proxy(&mut self) {
+        let list: Vec<telegram::MtProxy> = telegram::ranked(&self.cfg.data_dir())
+            .into_iter()
+            .take(3)
+            .collect();
+        if list.is_empty() {
+            self.status_msg = Some(
+                tr(
+                    &self.cfg.lang,
+                    "Списка ещё нет — сначала «Прокси Telegram»",
+                    "No list yet - run \"Telegram proxy\" first",
+                )
+                .to_string(),
+            );
+            return;
+        }
+        let nth = self.tg_next % list.len();
+        self.tg_next = nth + 1;
+        let p = &list[nth];
+        let msg = format!(
+            "{}: {}:{} · {}/{}",
+            tr(&self.cfg.lang, "Другой прокси", "Another proxy"),
+            p.server,
+            p.port,
+            nth + 1,
+            list.len()
+        );
+        if self.mode.is_demo() {
+            self.logs.push(format!("{msg} · demo"));
+        } else if let Err(e) = util::open_url(&p.link()) {
+            self.status_msg = Some(format!(
+                "{}: {e:#}",
+                tr(
+                    &self.cfg.lang,
+                    "Telegram не открылся",
+                    "Telegram did not open"
+                )
+            ));
+            return;
+        }
+        crate::logger::info(&msg);
+        self.status_msg = Some(msg);
     }
 
     /// Stops the bypass and returns the system to its normal state.

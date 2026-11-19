@@ -1430,6 +1430,14 @@ fn draw_update(f: &mut Frame, area: Rect, app: &App) {
                 "zapret, TgWsProxy, app",
             ),
         ),
+        (
+            tr(lang, "Другой прокси", "Another proxy"),
+            tr(
+                lang,
+                "если Telegram не принял — открыть резервный",
+                "open a backup one if Telegram rejected it",
+            ),
+        ),
         (tr(lang, "Назад", "Back"), ""),
     ];
 
@@ -1464,6 +1472,14 @@ fn draw_update(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(brand::secondary()),
             ))));
         }
+        items.push(ListItem::new(Line::from("")));
+    }
+
+    if let Some(msg) = &app.status_msg {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  {msg}"),
+            Style::default().fg(brand::secondary()),
+        ))));
         items.push(ListItem::new(Line::from("")));
     }
 
